@@ -285,32 +285,81 @@ def elk_listar_consultas(busca: str | None = None, espaco: str | None = None, li
                          ambiente: str | None = None) -> dict:
     """Consultas prontas do Kibana: buscas salvas do Discover (tipo `search`) e saved queries (`query`).
     `busca` filtra pelo início das palavras do título; `espaco` = space do Kibana (sem ele, todos).
-    Devolve {total, itens[:limite]}; total > limite → refine a `busca`. Cada item traz `consulta`, `filtros`
-    (Query DSL) e `indice` (padrão do data view, só em `search`), prontos para elk_buscar_logs/elk_contar/
-    elk_exportar_csv. Se `linguagem` = kuery, a consulta é KQL e vai como Lucene (operadores normalizados; `campo:{...}` não funciona)."""
+    Devolve {total, itens[:limite]} com `id`, `espaco`, `tipo` e `titulo` de cada consulta.
+    Use `elk_obter_consulta(id)` para obter os detalhes (consulta, filtros, índice)."""
     amb = _ambiente(ambiente)
-    objetos, views = [], {}
+    objetos = []
     for sp in _espacos(amb, espaco):
-        achados = [o | {"espaco": sp} for o in _saved_objects(amb, sp, ["search", "query"], busca)]
-        if any(o["type"] == "search" for o in achados[:limite]):
-            views |= {o["id"]: o["attributes"] for o in _saved_objects(amb, sp, ["index-pattern"], None)}
-        objetos += achados
-    out = []
-    for o in objetos[:limite]:
-        attrs, indice = o["attributes"], None
-        if o["type"] == "search":
-            src = json.loads(attrs.get("kibanaSavedObjectMeta", {}).get("searchSourceJSON") or "{}")
-            query, filters = src.get("query", {}), src.get("filter", [])
-            ref = next((r["id"] for r in o.get("references", []) if r.get("type") == "index-pattern"), None)
-            indice = views.get(ref, {}).get("title")
-        else:
-            query, filters = attrs.get("query", {}), attrs.get("filters", [])
-        out.append({
-            "id": o["id"], "espaco": o["espaco"], "tipo": o["type"], "titulo": attrs.get("title"), "descricao": attrs.get("description") or None,
-            "consulta": query.get("query") or None, "linguagem": query.get("language"),
-            "filtros": _filtros_kibana(filters), "indice": indice, "colunas": attrs.get("columns"),
-        })
+        objetos += [o | {"espaco": sp} for o in _saved_objects(amb, sp, ["search", "query"], busca)]
+    out = [{"id": o["id"], "espaco": o["espaco"], "tipo": o["type"], "titulo": o["attributes"].get("title")}
+           for o in objetos[:limite]]
     return {"total": len(objetos), "itens": out}
+
+
+def _obter_saved_object(amb: str, id: str, espaco: str | None = None) -> tuple[dict, str]:
+    """Busca um saved object por ID. Se `espaco` for informado, busca só nele; senão, busca em todos os spaces."""
+    spaces = [espaco] if espaco else _espacos(amb, None)
+    for sp in spaces:
+        base = _kibana(amb) if sp == "default" else f"{_kibana(amb)}/s/{sp}"
+        for tipo in ["search", "query"]:
+            try:
+                obj = get_session().request("GET", f"{base}/api/saved_objects/{tipo}/{id}")
+                return obj, sp
+            except ElkHttpError as e:
+                if e.status_code != 404:
+                    raise
+    raise LookupError(f"Consulta não encontrada: {id}")
+
+
+@tool
+def elk_obter_consulta(id: str, espaco: str | None = None, ambiente: str | None = None) -> dict:
+    """Obtém os detalhes de uma consulta salva pelo ID. `espaco` = space do Kibana (sem ele, busca em todos).
+    Retorna `id`, `espaco`, `tipo`, `titulo`, `descricao`, `consulta` (Lucene), `linguagem`, `filtros` (Query DSL),
+    `indice` (padrão do data view, só em `search`) e `colunas`. Use os campos `consulta`, `filtros` e `indice`
+    diretamente em elk_buscar_logs/elk_contar/elk_exportar_csv."""
+    amb = _ambiente(ambiente)
+    obj, found_espaco = _obter_saved_object(amb, id, espaco)
+    attrs = obj["attributes"]
+    indice = None
+    if obj["type"] == "search":
+        src = json.loads(attrs.get("kibanaSavedObjectMeta", {}).get("searchSourceJSON") or "{}")
+        query, filters = src.get("query", {}), src.get("filter", [])
+        ref = next((r["id"] for r in obj.get("references", []) if r.get("type") == "index-pattern"), None)
+        if ref:
+            views = {o["id"]: o["attributes"] for o in _saved_objects(amb, found_espaco, ["index-pattern"], None)}
+            indice = views.get(ref, {}).get("title")
+    else:
+        query, filters = attrs.get("query", {}), attrs.get("filters", [])
+    return {
+        "id": obj["id"], "espaco": found_espaco, "tipo": obj["type"], "titulo": attrs.get("title"),
+        "descricao": attrs.get("description") or None, "consulta": query.get("query") or None,
+        "linguagem": query.get("language"), "filtros": _filtros_kibana(filters), "indice": indice,
+        "colunas": attrs.get("columns"),
+    }
+
+
+@tool
+def elk_criar_consulta(titulo: str, indice: str, consulta: str | None = None, filtros: list[dict] | None = None,
+                       descricao: str | None = None, espaco: str = "default",
+                       ambiente: str | None = None) -> dict:
+    """Cria uma consulta salva (saved query) no Kibana. `titulo` = nome da consulta; `indice` = padrão do data view
+    (ex.: 'logs-app-*'); `consulta` = Lucene; `filtros` = Query DSL (lista de objetos, como em elk_buscar_logs).
+    Retorna `id` e `titulo` da consulta criada."""
+    if not (consulta or filtros):
+        raise ValueError("Informe `consulta` ou `filtros` (ou ambos).")
+    amb = _ambiente(ambiente)
+    base = _kibana(amb) if espaco == "default" else f"{_kibana(amb)}/s/{espaco}"
+    # Criar como saved query (tipo "query") — mais simples que search e não depende de index-pattern
+    body = {
+        "attributes": {
+            "title": titulo,
+            "description": descricao or "",
+            "query": {"query": consulta or "", "language": "lucene"},
+            "filters": [{"meta": {}, "query": f} for f in (filtros or [])],
+        }
+    }
+    resp = get_session().request("POST", f"{base}/api/saved_objects/query", json=body)
+    return {"id": resp["id"], "titulo": titulo}
 
 
 @tool

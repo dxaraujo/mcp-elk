@@ -178,13 +178,52 @@ def test_listar_consultas(fake):
     assert "search=Err%2A" in fake.calls[1].url
     out = resp["itens"]
     assert resp["total"] == 2
-    assert out[0] == {"id": "s1", "espaco": "default", "tipo": "search", "titulo": "Erros", "descricao": None, "consulta": "level:ERROR",
-                      "linguagem": "kuery", "filtros": [{"bool": {"must_not": [{"match_phrase": {"a": "b"}}]}}],
-                      "indice": "logs-*", "colunas": ["message"]}
-    assert out[1]["tipo"] == "query" and out[1]["consulta"] == "tempo:>1000" and out[1]["indice"] is None
+    # Novo formato: apenas id, espaco, tipo e titulo
+    assert out[0] == {"id": "s1", "espaco": "default", "tipo": "search", "titulo": "Erros"}
+    assert out[1] == {"id": "q1", "espaco": "default", "tipo": "query", "titulo": "Lentas"}
     assert server.elk_listar_indices(espaco="default") == [{"espaco": "default", "nome": "logs-*", "padrao": "logs-*",
                                                             "campo_tempo": "@timestamp"}]
     assert server.elk_listar_consultas(espaco="neg") == {"total": 0, "itens": []}
+
+
+def test_obter_consulta(fake):
+    """Testa elk_obter_consulta que retorna os detalhes completos de uma consulta."""
+    search = {"id": "s1", "type": "search", "attributes": {"title": "Erros", "description": "Logs de erro",
+        "columns": ["message"], "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({
+            "query": {"query": "level:ERROR", "language": "kuery"},
+            "filter": [{"meta": {"negate": True}, "query": {"match_phrase": {"a": "b"}}}]})}},
+        "references": [{"type": "index-pattern", "id": "dv1"}]}
+    dv = {"id": "dv1", "type": "index-pattern", "attributes": {"title": "logs-*", "timeFieldName": "@timestamp"}}
+
+    fake.routes[("GET", f"{KIBANA}/api/spaces/space")] = (200, [{"id": "default"}])
+    fake.routes[("GET", f"{KIBANA}/api/saved_objects/search/s1")] = (200, search)
+    fake.routes[("GET", f"{KIBANA}/api/saved_objects/_find")] = (200, {"saved_objects": [dv]})
+
+    # Teste sem espaco (busca em todos)
+    out = server.elk_obter_consulta("s1")
+    assert out["id"] == "s1"
+    assert out["titulo"] == "Erros"
+    assert out["descricao"] == "Logs de erro"
+    assert out["consulta"] == "level:ERROR"
+    assert out["linguagem"] == "kuery"
+    assert out["filtros"] == [{"bool": {"must_not": [{"match_phrase": {"a": "b"}}]}}]
+    assert out["indice"] == "logs-*"
+    assert out["colunas"] == ["message"]
+
+    # Teste com espaco específico (mais eficiente)
+    out2 = server.elk_obter_consulta("s1", espaco="default")
+    assert out2["id"] == "s1"
+    assert out2["espaco"] == "default"
+
+
+def test_obter_consulta_nao_encontrada(fake):
+    """Testa erro quando a consulta não existe."""
+    fake.routes[("GET", f"{KIBANA}/api/spaces/space")] = (200, [{"id": "default"}])
+    fake.routes[("GET", f"{KIBANA}/api/saved_objects/search/inexistente")] = (404, {"error": "Not Found"})
+    fake.routes[("GET", f"{KIBANA}/api/saved_objects/query/inexistente")] = (404, {"error": "Not Found"})
+
+    with pytest.raises(LookupError, match="não encontrada"):
+        server.elk_obter_consulta("inexistente")
 
 
 def test_listar_campos(fake):
