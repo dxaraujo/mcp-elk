@@ -1,7 +1,7 @@
 [project]
 name = "mcp-elk"
-version = "1.0.2"
-description = "MCP server de leitura para Elasticsearch/Kibana (ELK): busca, contagem, consultas salvas e exportação CSV"
+version = "1.0.3"
+description = "MCP server para Elasticsearch/Kibana (ELK): busca, contagem, consultas salvas (ler, criar, atualizar) e exportação CSV"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

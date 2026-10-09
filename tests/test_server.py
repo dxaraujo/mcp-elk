@@ -98,6 +98,8 @@ def test_ambiente_desconhecido_e_sem_url(fake):
 def test_lucene():
     assert server._lucene('a: x and b: "y and z" or not c') == 'a: x AND b: "y and z" OR NOT c'
     assert server._lucene("android:1 AND brand:x") == "android:1 AND brand:x"
+    assert server._lucene('n > 0 and dt.x >= 10 and m: "a > b"') == 'n:>0 AND dt.x:>=10 AND m: "a > b"'
+    assert server._lucene("n:>0 AND n:[1 TO 5]") == "n:>0 AND n:[1 TO 5]"
 
 
 def test_query():
@@ -108,6 +110,8 @@ def test_query():
         {"range": {"ts": {"gte": "now-1h", "lte": "now"}}}]}}
     with pytest.raises(ValueError, match="vazia"):
         server._query("now-1h", "now", None, None, None, "ts")
+    q = server._query("now-1h", "now", None, {"sistema.nome": "app*", "n": 1}, None, "ts")
+    assert q["bool"]["filter"][:2] == [{"wildcard": {"sistema.nome": {"value": "app*"}}}, {"term": {"n": 1}}]
 
 
 # ---------------------------------------------------------------- busca e contagem
@@ -282,3 +286,67 @@ def test_exportar_csv_pit_e_truncado(fake_es, tmp_path, monkeypatch):
 def test_exportar_csv_caminho_relativo():
     with pytest.raises(ValueError, match="absoluto"):
         server.elk_exportar_csv("l", "now-1h", "out.csv", consulta="x")
+
+
+def test_filtros_kibana_ignora_vazio():
+    assert server._filtros_kibana([{"meta": {}, "query": {}}, {"meta": {"negate": True}, "query": {"term": {"a": 1}}}]) == [
+        {"bool": {"must_not": [{"term": {"a": 1}}]}}]
+
+
+def test_criar_consulta_search_com_data_view(fake):
+    dv = {"id": "dv1", "type": "index-pattern", "attributes": {"title": "logs-*"}}
+    fake.routes[("GET", f"{KIBANA}/s/neg/api/saved_objects/_find")] = (200, {"saved_objects": [dv]})
+    fake.routes[("POST", f"{KIBANA}/s/neg/api/saved_objects/search")] = (200, {"id": "novo"})
+    out = server.elk_criar_consulta("Erros", "logs-*", consulta="msg: *timeout*", campos={"sis": "x", "cat": "a*"},
+                                    filtros=[{"term": {"a": 1}}], colunas=["message"], espaco="neg")
+    assert out == {"id": "novo", "titulo": "Erros", "espaco": "neg"}
+    sent = body(fake.calls[-1])
+    assert [r["name"] for r in sent["references"]] == ["kibanaSavedObjectMeta.searchSourceJSON.index"] + [
+        f"kibanaSavedObjectMeta.searchSourceJSON.filter[{i}].meta.index" for i in range(3)]
+    assert {r["id"] for r in sent["references"]} == {"dv1"}
+    src = json.loads(sent["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])
+    assert src["query"] == {"query": "msg: *timeout*", "language": "kuery"}
+    pilula = src["filter"][0]["meta"]
+    assert (pilula["type"], pilula["key"], pilula["params"]) == ("phrase", "sis", {"query": "x"})
+    assert server._filtros_kibana(src["filter"]) == [{"match_phrase": {"sis": "x"}},
+                                                     {"wildcard": {"cat": {"value": "a*"}}}, {"term": {"a": 1}}]
+    assert sent["attributes"]["columns"] == ["message"]
+    server.elk_criar_consulta("L", "logs-*", consulta="n:[1 TO 5]", linguagem="lucene", espaco="neg")
+    assert json.loads(body(fake.calls[-1])["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"][
+        "language"] == "lucene"
+    with pytest.raises(ValueError, match="Linguagem desconhecida"):
+        server.elk_criar_consulta("X", "logs-*", consulta="a", linguagem="sql", espaco="neg")
+    with pytest.raises(LookupError, match="Data view 'outro-\\*'"):
+        server.elk_criar_consulta("X", "outro-*", consulta="a", espaco="neg")
+
+
+def test_atualizar_consulta_preserva_o_resto(fake):
+    url = f"{KIBANA}/s/neg/api/saved_objects/search/s1"
+    src = {"query": {"query": "msg: x", "language": "kuery"},
+           "filter": [{"meta": {"indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.filter[0].meta.index"},
+                       "query": {"match_phrase": {"a": "b"}}}], "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index"}
+    refs = [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": "dv1"},
+            {"name": "kibanaSavedObjectMeta.searchSourceJSON.filter[0].meta.index", "type": "index-pattern", "id": "dv1"}]
+    fake.routes[("GET", url)] = (200, {"id": "s1", "type": "search", "references": refs, "attributes": {
+        "title": "Velho", "description": "d", "columns": ["m"], "sort": [["@timestamp", "desc"]],
+        "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps(src)}}})
+    fake.routes[("PUT", url)] = (200, {"id": "s1"})
+
+    assert server.elk_atualizar_consulta("s1", "neg", titulo="Novo") == {"id": "s1", "titulo": "Novo", "espaco": "neg"}
+    sent = body(fake.calls[-1])
+    assert sent["attributes"]["sort"] == [["@timestamp", "desc"]] and sent["attributes"]["columns"] == ["m"]
+    assert sent["references"] == refs
+    novo = json.loads(sent["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])
+    assert novo["query"] == src["query"] and novo["filter"] == src["filter"]
+
+    server.elk_atualizar_consulta("s1", "neg", campos={"sis": "x", "nb": 0}, consulta="")
+    sent = body(fake.calls[-1])
+    novo = json.loads(sent["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])
+    assert novo["query"] == {"query": "", "language": "kuery"}
+    assert server._filtros_kibana(novo["filter"]) == [{"match_phrase": {"sis": "x"}}, {"match_phrase": {"nb": 0}}]
+    assert len(sent["references"]) == 3 and {r["id"] for r in sent["references"]} == {"dv1"}
+
+    with pytest.raises(ValueError, match="Nada a atualizar"):
+        server.elk_atualizar_consulta("s1", "neg")
+    with pytest.raises(LookupError, match="não encontrada"):
+        server.elk_atualizar_consulta("zz", "neg", titulo="x")

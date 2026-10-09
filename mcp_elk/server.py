@@ -176,12 +176,18 @@ def _saved_objects(amb: str, espaco: str, tipos: list[str], busca: str | None) -
 
 # ---------------------------------------------------------------- consulta
 
-_OPERADOR = re.compile(r'("(?:[^"\\]|\\.)*")|\b(and|or|not)\b', re.IGNORECASE)
+_OPERADOR = re.compile(r'("(?:[^"\\]|\\.)*")|\b(and|or|not)\b|([\w.@-]+)\s*(>=|<=|>|<)\s*', re.IGNORECASE)
+LINGUAGENS = {"kuery": "kuery", "kql": "kuery", "lucene": "lucene"}
 
 
 def _lucene(consulta: str) -> str:
-    """Operadores em maiúsculas fora de aspas: no KQL `and` é operador, no Lucene vira termo (e o resultado explode)."""
-    return _OPERADOR.sub(lambda m: m.group(1) or m.group(2).upper(), consulta)
+    """KQL simples -> Lucene, fora de aspas: operadores em maiúsculas (no Lucene `and` vira termo e o resultado
+    explode) e comparação `campo > 0` -> `campo:>0`. Lucene puro passa intacto."""
+    def troca(m):
+        if m.group(1):
+            return m.group(1)
+        return m.group(2).upper() if m.group(2) else f"{m.group(3)}:{m.group(4)}"
+    return _OPERADOR.sub(troca, consulta)
 
 
 def _query(inicio: str, fim: str, consulta: str | None, campos: dict | None, filtros: list | None,
@@ -189,7 +195,8 @@ def _query(inicio: str, fim: str, consulta: str | None, campos: dict | None, fil
     if not (consulta or campos or filtros):
         raise ValueError("Consulta vazia: informe `consulta`, `campos` ou `filtros`.")
     must = [{"query_string": {"query": _lucene(consulta)}}] if consulta else []
-    filtro = [{"term": {campo: valor}} for campo, valor in (campos or {}).items()]
+    filtro = [{"wildcard": {campo: {"value": valor}}} if isinstance(valor, str) and "*" in valor
+              else {"term": {campo: valor}} for campo, valor in (campos or {}).items()]
     filtro += list(filtros or [])
     filtro.append({"range": {campo_tempo: {"gte": inicio, "lte": fim}}})
     return {"bool": {"must": must, "filter": filtro}}
@@ -227,8 +234,9 @@ def elk_buscar_logs(indice: str, inicio: str, consulta: str | None = None, campo
                     retornar: list[str] | None = None, campo_tempo: str = "@timestamp",
                     ambiente: str | None = None) -> dict:
     """Busca documentos (só leitura). `consulta` é Lucene (query_string): `campo:valor AND msg:*timeout*`
-    (and/or/not viram maiúsculas fora de aspas, então KQL simples funciona; `campo:{...}` aninhado não).
-    `campos` = filtros exatos {campo: valor} (term); `filtros` = Query DSL
+    (and/or/not viram maiúsculas e `campo > 0` vira `campo:>0` fora de aspas, então KQL simples funciona;
+    `campo:{...}` aninhado não).
+    `campos` = filtros exatos {campo: valor} (term; valor com `*` vira wildcard: 'app*'); `filtros` = Query DSL
     crua (como vem de elk_listar_consultas). `inicio`/`fim`: 'now-15m', 'now-1d' ou ISO 8601.
     `limite` ≤ 100; `retornar` limita os campos de cada item. Itens achatados ({'a.b': v}), textos cortados em 2000.
     Para muitos documentos use elk_exportar_csv."""
@@ -275,7 +283,9 @@ def _filtros_kibana(filters: list[dict]) -> list[dict]:
         meta = f.get("meta", {})
         if meta.get("disabled"):
             continue
-        dsl = f.get("query") or {k: v for k, v in f.items() if k not in ("meta", "$state")}
+        dsl = f["query"] if "query" in f else {k: v for k, v in f.items() if k not in ("meta", "$state")}
+        if not dsl:  # filtro vazio do Kibana ({"query": {}}): o ES recusa com 400
+            continue
         out.append({"bool": {"must_not": [dsl]}} if meta.get("negate") else dsl)
     return out
 
@@ -338,28 +348,121 @@ def elk_obter_consulta(id: str, espaco: str | None = None, ambiente: str | None 
     }
 
 
+def _filtro_discover(i: int, campo: str | None, valor, dsl: dict | None = None) -> dict:
+    """Filtro no formato que o Discover grava (aparece como pílula): `phrase` para {campo: valor}; `custom` para
+    wildcard e Query DSL crua."""
+    meta = {"alias": None, "disabled": False, "negate": False,
+            "indexRefName": f"kibanaSavedObjectMeta.searchSourceJSON.filter[{i}].meta.index"}
+    if dsl is None and not (isinstance(valor, str) and "*" in valor):
+        return {"meta": meta | {"key": campo, "field": campo, "params": {"query": valor}, "type": "phrase"},
+                "query": {"match_phrase": {campo: valor}}, "$state": {"store": "appState"}}
+    dsl = dsl or {"wildcard": {campo: {"value": valor}}}
+    return {"meta": meta | {"type": "custom", "key": "query", "value": json.dumps(dsl, ensure_ascii=False)},
+            "query": dsl, "$state": {"store": "appState"}}
+
+
+_REF_INDICE = "kibanaSavedObjectMeta.searchSourceJSON.index"
+
+
+def _data_view_id(amb: str, espaco: str, indice: str) -> str:
+    view = next((o for o in _saved_objects(amb, espaco, ["index-pattern"], None)
+                 if o["attributes"].get("title") == indice), None)
+    if not view:
+        raise LookupError(f"Data view '{indice}' não existe no espaço '{espaco}': use o `padrao` de "
+                          f"elk_listar_indices(espaco='{espaco}').")
+    return view["id"]
+
+
+def _linguagem(linguagem: str) -> str:
+    lang = LINGUAGENS.get(linguagem.strip().lower())
+    if not lang:
+        raise ValueError(f"Linguagem desconhecida: '{linguagem}'. Use kuery (KQL) ou lucene.")
+    return lang
+
+
+def _filtros_discover(campos: dict | None, filtros: list | None) -> list[dict]:
+    itens = [(c, v, None) for c, v in (campos or {}).items()] + [(None, None, f) for f in (filtros or [])]
+    return [_filtro_discover(i, *item) for i, item in enumerate(itens)]
+
+
+def _corpo_search(view_id: str, titulo: str, consulta: str | None, campos: dict | None, filtros: list | None,
+                  colunas: list | None, descricao: str | None, lang: str) -> dict:
+    filtro = _filtros_discover(campos, filtros)
+    source = {"query": {"query": consulta or "", "language": lang}, "filter": filtro, "indexRefName": _REF_INDICE}
+    refs = [_REF_INDICE] + [f["meta"]["indexRefName"] for f in filtro]
+    return {
+        "attributes": {"title": titulo, "description": descricao or "", "columns": colunas or [],
+                       "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps(source, ensure_ascii=False)}},
+        "references": [{"name": r, "type": "index-pattern", "id": view_id} for r in refs],
+    }
+
+
 @tool
-def elk_criar_consulta(titulo: str, indice: str, consulta: str | None = None, filtros: list[dict] | None = None,
-                       descricao: str | None = None, espaco: str = "default",
+def elk_criar_consulta(titulo: str, indice: str, consulta: str | None = None, campos: dict[str, str] | None = None,
+                       filtros: list[dict] | None = None, colunas: list[str] | None = None,
+                       descricao: str | None = None, espaco: str = "default", linguagem: str = "kuery",
                        ambiente: str | None = None) -> dict:
-    """Cria uma consulta salva (saved query) no Kibana. `titulo` = nome da consulta; `indice` = padrão do data view
-    (ex.: 'logs-app-*'); `consulta` = Lucene; `filtros` = Query DSL (lista de objetos, como em elk_buscar_logs).
-    Retorna `id` e `titulo` da consulta criada."""
-    if not (consulta or filtros):
-        raise ValueError("Informe `consulta` ou `filtros` (ou ambos).")
+    """Cria uma busca salva do Discover (tipo `search`) no Kibana, ligada ao data view.
+    `indice` = padrão do data view no `espaco` (de elk_listar_indices); `campos` = filtros {campo: valor} que aparecem
+    como pílulas no Discover (valor com `*` vira wildcard); `filtros` = Query DSL (lista), também como pílulas;
+    `consulta` = texto da barra de busca, no idioma de `linguagem`: 'kuery'/'kql' (padrão; `msg: *timeout* and n > 0`,
+    sem `campo:{...}`) ou 'lucene' (`msg:*timeout* AND n:[1 TO 5]`); `colunas` = campos exibidos no Discover.
+    Retorna `id`, `titulo` e `espaco`."""
+    if not (consulta or campos or filtros):
+        raise ValueError("Informe `consulta`, `campos` ou `filtros`.")
+    lang = _linguagem(linguagem)
+    amb = _ambiente(ambiente)
+    body = _corpo_search(_data_view_id(amb, espaco, indice), titulo, consulta, campos, filtros, colunas, descricao,
+                         lang)
+    base = _kibana(amb) if espaco == "default" else f"{_kibana(amb)}/s/{espaco}"
+    resp = get_session().request("POST", f"{base}/api/saved_objects/search", json=body)
+    return {"id": resp["id"], "titulo": titulo, "espaco": espaco}
+
+
+@tool
+def elk_atualizar_consulta(id: str, espaco: str = "default", titulo: str | None = None, indice: str | None = None,
+                           consulta: str | None = None, campos: dict[str, str] | None = None,
+                           filtros: list[dict] | None = None, colunas: list[str] | None = None,
+                           descricao: str | None = None, linguagem: str | None = None,
+                           ambiente: str | None = None) -> dict:
+    """Atualiza uma busca salva do Discover (tipo `search`) existente: troca só o que for informado e preserva o resto
+    (ordenação, colunas, período e layout feitos no Kibana). `campos`/`filtros` (mesmo formato de elk_criar_consulta)
+    substituem **todos** os filtros; `consulta=""` limpa a barra de busca; `indice` religa a outro data view do
+    `espaco`. Retorna `id`, `titulo` e `espaco`."""
+    if all(v is None for v in (titulo, indice, consulta, campos, filtros, colunas, descricao, linguagem)):
+        raise ValueError("Nada a atualizar: informe ao menos um campo.")
     amb = _ambiente(ambiente)
     base = _kibana(amb) if espaco == "default" else f"{_kibana(amb)}/s/{espaco}"
-    # Criar como saved query (tipo "query") — mais simples que search e não depende de index-pattern
-    body = {
-        "attributes": {
-            "title": titulo,
-            "description": descricao or "",
-            "query": {"query": consulta or "", "language": "lucene"},
-            "filters": [{"meta": {}, "query": f} for f in (filtros or [])],
-        }
-    }
-    resp = get_session().request("POST", f"{base}/api/saved_objects/query", json=body)
-    return {"id": resp["id"], "titulo": titulo}
+    url = f"{base}/api/saved_objects/search/{id}"
+    try:
+        obj = get_session().request("GET", url)
+    except ElkHttpError as e:
+        if e.status_code == 404:
+            raise LookupError(f"Busca salva '{id}' não encontrada no espaço '{espaco}' (só o tipo `search` é "
+                              "atualizável; use elk_listar_consultas).") from e
+        raise
+    attrs = obj["attributes"]
+    src = json.loads(attrs.get("kibanaSavedObjectMeta", {}).get("searchSourceJSON") or "{}")
+    refs = obj.get("references", [])
+    view_id = _data_view_id(amb, espaco, indice) if indice else next(
+        (r["id"] for r in refs if r["name"] == _REF_INDICE), None)
+    if consulta is not None or linguagem:
+        atual = src.get("query", {})
+        src["query"] = {"query": atual.get("query", "") if consulta is None else consulta,
+                        "language": _linguagem(linguagem) if linguagem else atual.get("language", "kuery")}
+    if campos is not None or filtros is not None:
+        src["filter"] = _filtros_discover(campos, filtros)
+        refs = [{"name": n, "type": "index-pattern", "id": view_id}
+                for n in [_REF_INDICE] + [f["meta"]["indexRefName"] for f in src["filter"]]]
+    elif indice:
+        refs = [r | {"id": view_id} if r.get("type") == "index-pattern" else r for r in refs]
+    src["indexRefName"] = _REF_INDICE
+    novos = {"title": titulo, "description": descricao, "columns": colunas}
+    attrs = attrs | {k: v for k, v in novos.items() if v is not None}
+    attrs["kibanaSavedObjectMeta"] = {**attrs.get("kibanaSavedObjectMeta", {}),
+                                      "searchSourceJSON": json.dumps(src, ensure_ascii=False)}
+    get_session().request("PUT", url, json={"attributes": attrs, "references": refs})
+    return {"id": id, "titulo": attrs.get("title"), "espaco": espaco}
 
 
 @tool
