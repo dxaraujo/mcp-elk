@@ -1,7 +1,7 @@
 [project]
 name = "mcp-elk"
-version = "1.0.3"
-description = "MCP server para Elasticsearch/Kibana (ELK): busca, contagem, consultas salvas (ler, criar, atualizar) e exportação CSV"
+version = "3.0.0"
+description = "MCP do ELK (Elasticsearch/Kibana): logs pela config do projeto, contagem comparada, exportação CSV, execução de job Spring Batch e consultas salvas"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=2.2",
     "requests>=2.31",
+    "jsonschema>=4",
 ]
 
 [project.urls]
@@ -20,6 +21,9 @@ mcp-elk = "mcp_elk.server:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_elk"]
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dxaraujo/kiro/main/mcps/elk/mcp_elk/elk.schema.json",
+  "title": "ELK Project Configuration",
+  "description": "Arquivo .kiro/config/elk/elk-<ambiente>.json (elk-prod.json, elk-homol.json, elk-dev.json), lido pelo mcp-elk e gravado pela tool elk_configurar. Um por ambiente. Sem segredos: credenciais ficam no elk.properties do MCP.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "indice-padrao",
+    "indices"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "URL do JSON Schema deste arquivo, para validação no editor.",
+      "format": "uri"
+    },
+    "indice-padrao": {
+      "type": "string",
+      "description": "Chave de `indices` usada quando o pedido não cita outro índice.",
+      "minLength": 1
+    },
+    "indices": {
+      "type": "object",
+      "description": "Mapa {nome curto: índice}. O nome é do projeto (ex.: 'aplicacao', 'infra').",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/indice"
+      }
+    },
+    "consultas": {
+      "type": "object",
+      "description": "Mapa {titulo: {id, espaco}} das consultas salvas do Kibana. A chave é o título; as tools aceitam o título em `salva`. elk_criar_consulta registra aqui as que cria.",
+      "additionalProperties": {
+        "$ref": "#/$defs/consulta"
+      }
+    },
+    "download": {
+      "type": "object",
+      "description": "Destino dos CSV de elk_exportar_csv.",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Pasta relativa à raiz do repositório, com '/' (ex.: 'downloads/elk').",
+          "minLength": 1,
+          "pattern": "^(?![/\\\\])(?![A-Za-z]:)(?!.*\\\\).+$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "indice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "padrao",
+        "campo-tempo"
+      ],
+      "properties": {
+        "padrao": {
+          "type": "string",
+          "description": "Padrão do data view (vai em `indice` das tools), ex.: 'logs-app-*'.",
+          "minLength": 1
+        },
+        "campo-tempo": {
+          "type": "string",
+          "description": "Campo de tempo do data view (vai em `campo_tempo`).",
+          "minLength": 1
+        },
+        "fixos": {
+          "type": "object",
+          "description": "Filtros {campo: valor ou wildcard} aplicados em toda consulta (o recorte do projeto). Valores com * (ex.: 'myapp*') viram filtro wildcard em vez de term.",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "campos": {
+          "type": "object",
+          "description": "Mapa {apelido: campo real}; as tools aceitam o apelido em campos, consulta, retornar e agrupar_por. Papéis conhecidos: nivel, mensagem, servico, logger, thread, excecao, stacktrace, host, uri, trace.",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "valores": {
+          "type": "object",
+          "description": "Mapa {apelido: [valores reais]} de campos agregáveis, vindos de elk_contar(agrupar_por).",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "consulta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "UUID da consulta salva no Kibana.",
+          "minLength": 1
+        },
+        "espaco": {
+          "type": "string",
+          "description": "Space do Kibana onde a consulta está salva. Padrão: 'default'.",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

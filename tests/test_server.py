@@ -8,6 +8,7 @@ from requests.adapters import BaseAdapter
 
 from mcp_elk import config, server
 from mcp_elk.config import ElkConfig
+from mcp_elk.contrato import Erro
 
 KIBANA = "https://kibana.test"
 ES = "https://es.test"
@@ -89,10 +90,10 @@ def test_ambiente(entrada, esperado):
 
 
 def test_ambiente_desconhecido_e_sem_url(fake):
-    with pytest.raises(ValueError, match="desconhecido"):
+    with pytest.raises(Erro, match="desconhecido"):
         server._ambiente("qa")
-    with pytest.raises(ValueError, match="'dev' sem URL"):
-        server.elk_contar("logs-*", "now-1h", consulta="x", ambiente="dev")
+    with pytest.raises(Erro, match="'dev' sem URL"):
+        server.elk_contar("now-1h", indice="logs-*", consulta="x", ambiente="dev")
 
 
 def test_lucene():
@@ -108,7 +109,7 @@ def test_query():
     assert q == {"bool": {"must": [{"query_string": {"query": "msg:erro"}}], "filter": [
         {"term": {"sis.nome": "a"}}, {"term": {"sis.cat": "b"}}, {"exists": {"field": "f"}},
         {"range": {"ts": {"gte": "now-1h", "lte": "now"}}}]}}
-    with pytest.raises(ValueError, match="vazia"):
+    with pytest.raises(Erro, match="vazia"):
         server._query("now-1h", "now", None, None, None, "ts")
     q = server._query("now-1h", "now", None, {"sistema.nome": "app*", "n": 1}, None, "ts")
     assert q["bool"]["filter"][:2] == [{"wildcard": {"sistema.nome": {"value": "app*"}}}, {"term": {"n": 1}}]
@@ -119,7 +120,7 @@ def test_query():
 def test_buscar_logs_kibana(fake):
     fake.routes[("POST", f"{KIBANA}/internal/search/es")] = (200, {"rawResponse": {
         "hits": {"total": {"value": 7}, "hits": [HIT]}}})
-    out = server.elk_buscar_logs("logs-*", "now-15m", campos={"sis": "a"}, limite=5, retornar=["message"],
+    out = server.elk_buscar_logs("now-15m", indice="logs-*", campos={"sis": "a"}, limite=5, retornar=["message"],
                                  ambiente="homologação")
     sent = body(fake.calls[0])
     assert sent["params"]["index"] == "logs-*"
@@ -132,14 +133,14 @@ def test_buscar_logs_kibana(fake):
 
 
 def test_buscar_logs_limite():
-    with pytest.raises(ValueError, match="elk_exportar_csv"):
-        server.elk_buscar_logs("logs-*", "now-1h", consulta="x", limite=500)
+    with pytest.raises(Erro, match="elk_exportar_csv"):
+        server.elk_buscar_logs("now-1h", indice="logs-*", consulta="x", limite=500)
 
 
 def test_contar_agrupado_es_direto(fake_es):
     fake_es.routes[("POST", f"{ES}/logs-*/_search")] = (200, {"hits": {"total": {"value": 30}, "hits": []},
         "aggregations": {"grupos": {"buckets": [{"key": "app-a", "doc_count": 20}]}}})
-    out = server.elk_contar("logs-*", "now-1h", consulta="x", agrupar_por="sis.nome", top=3)
+    out = server.elk_contar("now-1h", indice="logs-*", consulta="x", agrupar_por="sis.nome", top=3)
     assert body(fake_es.calls[0])["aggs"] == {"grupos": {"terms": {"field": "sis.nome", "size": 3}}}
     assert out["total"] == 30 and out["grupos"] == [{"valor": "app-a", "total": 20}]
 
@@ -149,14 +150,14 @@ def test_erro_de_certificado(fake, monkeypatch):
         raise requests.exceptions.SSLError("CERTIFICATE_VERIFY_FAILED")
 
     fake.routes[("POST", f"{KIBANA}/internal/search/es")] = ssl_error
-    with pytest.raises(RuntimeError, match="elk-bundle.pem"):
-        server.elk_contar("logs-*", "now-1h", consulta="x")
+    with pytest.raises(Erro, match="elk-bundle.pem"):
+        server.elk_contar("now-1h", indice="logs-*", consulta="x")
 
 
 def test_http_403(fake):
     fake.routes[("POST", f"{KIBANA}/internal/search/es")] = (403, b'{"error":"Forbidden"}')
     with pytest.raises(server.ElkHttpError, match="HTTP 403 em POST"):
-        server.elk_contar("logs-*", "now-1h", consulta="x")
+        server.elk_contar("now-1h", indice="logs-*", consulta="x")
 
 
 # ---------------------------------------------------------------- consultas salvas, índices e campos
@@ -185,8 +186,8 @@ def test_listar_consultas(fake):
     # Novo formato: apenas id, espaco, tipo e titulo
     assert out[0] == {"id": "s1", "espaco": "default", "tipo": "search", "titulo": "Erros"}
     assert out[1] == {"id": "q1", "espaco": "default", "tipo": "query", "titulo": "Lentas"}
-    assert server.elk_listar_indices(espaco="default") == [{"espaco": "default", "nome": "logs-*", "padrao": "logs-*",
-                                                            "campo_tempo": "@timestamp"}]
+    assert server.elk_listar_indices(espaco="default")["itens"] == [
+        {"espaco": "default", "nome": "logs-*", "padrao": "logs-*", "campo_tempo": "@timestamp"}]
     assert server.elk_listar_consultas(espaco="neg") == {"total": 0, "itens": []}
 
 
@@ -234,8 +235,8 @@ def test_listar_campos(fake):
     fake.routes[("GET", f"{KIBANA}/internal/data_views/_fields_for_wildcard")] = (200, {"fields": [
         {"name": "sis.nome", "esTypes": ["keyword"], "aggregatable": True},
         {"name": "_id", "type": "string"}, {"name": "message", "esTypes": ["text"], "aggregatable": False}]})
-    assert server.elk_listar_campos("logs-*", busca="sis") == [{"campo": "sis.nome", "tipo": "keyword",
-                                                                "agregavel": True}]
+    assert server.elk_listar_campos("sis", indice="logs-*") == {"total": 1, "itens": [
+        {"campo": "sis.nome", "tipo": "keyword", "agregavel": True}]}
 
 
 # ---------------------------------------------------------------- exportação CSV
@@ -256,10 +257,11 @@ def test_exportar_csv_sem_pit_nao_perde_nem_duplica(fake, tmp_path, monkeypatch)
 
     fake.routes[("POST", f"{KIBANA}/internal/search/es")] = search
     arquivo = tmp_path / "sub" / "out.csv"
-    out = server.elk_exportar_csv("l", "now-1h", str(arquivo), consulta="x", campo_tempo="ts")
+    out = server.elk_exportar_csv("now-1h", arquivo=str(arquivo), indice="l", consulta="x", campo_tempo="ts")
     rows = list(csv.DictReader(arquivo.open(encoding="utf-8-sig")))
     assert [r["a.b"] for r in rows] == ["1", "2", "3", "4", "5"]
     assert rows[0]["tags"] == '["x"]'
+    assert out.pop("proximo").startswith("não leia o CSV inteiro")
     assert out == {"arquivo": str(arquivo), "linhas": 5, "total": 5, "truncado": False,
                    "colunas": ["ts", "a.b", "tags"]}
 
@@ -277,15 +279,15 @@ def test_exportar_csv_pit_e_truncado(fake_es, tmp_path, monkeypatch):
         return 200, {"pit_id": "pit1", "hits": {"total": {"value": 5}, "hits": [d for d in docs if d["sort"][0] > after][:2]}}
 
     fake_es.routes[("POST", f"{ES}/_search")] = search
-    out = server.elk_exportar_csv("l", "now-1h", str(tmp_path / "o.csv"), consulta="x", retornar=["a.b"],
-                                  max_linhas=3, campo_tempo="ts")
+    out = server.elk_exportar_csv("now-1h", arquivo=str(tmp_path / "o.csv"), indice="l", consulta="x",
+                                  retornar=["a.b"], max_linhas=3, campo_tempo="ts")
     assert out["linhas"] == 3 and out["truncado"] is True and out["colunas"] == ["a.b"]
     assert fake_es.calls[-1].method == "DELETE"
 
 
 def test_exportar_csv_caminho_relativo():
-    with pytest.raises(ValueError, match="absoluto"):
-        server.elk_exportar_csv("l", "now-1h", "out.csv", consulta="x")
+    with pytest.raises(Erro, match="absoluto"):
+        server.elk_exportar_csv("now-1h", arquivo="out.csv", indice="l", consulta="x")
 
 
 def test_filtros_kibana_ignora_vazio():
@@ -297,7 +299,7 @@ def test_criar_consulta_search_com_data_view(fake):
     dv = {"id": "dv1", "type": "index-pattern", "attributes": {"title": "logs-*"}}
     fake.routes[("GET", f"{KIBANA}/s/neg/api/saved_objects/_find")] = (200, {"saved_objects": [dv]})
     fake.routes[("POST", f"{KIBANA}/s/neg/api/saved_objects/search")] = (200, {"id": "novo"})
-    out = server.elk_criar_consulta("Erros", "logs-*", consulta="msg: *timeout*", campos={"sis": "x", "cat": "a*"},
+    out = server.elk_criar_consulta("Erros", indice="logs-*", consulta="msg: *timeout*", campos={"sis": "x", "cat": "a*"},
                                     filtros=[{"term": {"a": 1}}], colunas=["message"], espaco="neg")
     assert out == {"id": "novo", "titulo": "Erros", "espaco": "neg"}
     sent = body(fake.calls[-1])
@@ -311,13 +313,13 @@ def test_criar_consulta_search_com_data_view(fake):
     assert server._filtros_kibana(src["filter"]) == [{"match_phrase": {"sis": "x"}},
                                                      {"wildcard": {"cat": {"value": "a*"}}}, {"term": {"a": 1}}]
     assert sent["attributes"]["columns"] == ["message"]
-    server.elk_criar_consulta("L", "logs-*", consulta="n:[1 TO 5]", linguagem="lucene", espaco="neg")
+    server.elk_criar_consulta("L", indice="logs-*", consulta="n:[1 TO 5]", linguagem="lucene", espaco="neg")
     assert json.loads(body(fake.calls[-1])["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])["query"][
         "language"] == "lucene"
-    with pytest.raises(ValueError, match="Linguagem desconhecida"):
-        server.elk_criar_consulta("X", "logs-*", consulta="a", linguagem="sql", espaco="neg")
+    with pytest.raises(Erro, match="Linguagem desconhecida"):
+        server.elk_criar_consulta("X", indice="logs-*", consulta="a", linguagem="sql", espaco="neg")
     with pytest.raises(LookupError, match="Data view 'outro-\\*'"):
-        server.elk_criar_consulta("X", "outro-*", consulta="a", espaco="neg")
+        server.elk_criar_consulta("X", indice="outro-*", consulta="a", espaco="neg")
 
 
 def test_atualizar_consulta_preserva_o_resto(fake):
@@ -332,21 +334,192 @@ def test_atualizar_consulta_preserva_o_resto(fake):
         "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps(src)}}})
     fake.routes[("PUT", url)] = (200, {"id": "s1"})
 
-    assert server.elk_atualizar_consulta("s1", "neg", titulo="Novo") == {"id": "s1", "titulo": "Novo", "espaco": "neg"}
+    assert server.elk_atualizar_consulta("s1", espaco="neg", titulo="Novo") == {"id": "s1", "titulo": "Novo", "espaco": "neg"}
     sent = body(fake.calls[-1])
     assert sent["attributes"]["sort"] == [["@timestamp", "desc"]] and sent["attributes"]["columns"] == ["m"]
     assert sent["references"] == refs
     novo = json.loads(sent["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])
     assert novo["query"] == src["query"] and novo["filter"] == src["filter"]
 
-    server.elk_atualizar_consulta("s1", "neg", campos={"sis": "x", "nb": 0}, consulta="")
+    server.elk_atualizar_consulta("s1", espaco="neg", campos={"sis": "x", "nb": 0}, consulta="")
     sent = body(fake.calls[-1])
     novo = json.loads(sent["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"])
     assert novo["query"] == {"query": "", "language": "kuery"}
     assert server._filtros_kibana(novo["filter"]) == [{"match_phrase": {"sis": "x"}}, {"match_phrase": {"nb": 0}}]
     assert len(sent["references"]) == 3 and {r["id"] for r in sent["references"]} == {"dv1"}
 
-    with pytest.raises(ValueError, match="Nada a atualizar"):
-        server.elk_atualizar_consulta("s1", "neg")
+    with pytest.raises(Erro, match="Nada a atualizar"):
+        server.elk_atualizar_consulta("s1", espaco="neg")
     with pytest.raises(LookupError, match="não encontrada"):
-        server.elk_atualizar_consulta("zz", "neg", titulo="x")
+        server.elk_atualizar_consulta("zz", espaco="neg", titulo="x")
+
+
+# ---------------------------------------------------------------- contrato e tools/list
+
+def test_tools_list_enxuto_sem_output_schema():
+    import asyncio
+    tools = asyncio.run(server.mcp.list_tools())
+    assert len(tools) == 12
+    assert sum(len(t.description or "") + len(json.dumps(t.input_schema)) for t in tools) <= 11_500  # medido: 10_760
+    for t in tools:
+        assert t.output_schema is None and "→" in t.description, t.name
+
+
+def test_envelope():
+    from mcp_elk.contrato import operacao
+
+    def falha():
+        raise Erro("config", "sem arquivo", "indice")
+
+    assert json.loads(operacao(falha)()) == {"ok": False, "erro": {"codigo": "config", "detalhe": "sem arquivo",
+                                                                    "campo": "indice"}}
+    assert operacao(lambda: {"a": 1})() == '{"ok":true,"dados":{"a":1}}'
+    assert operacao(lambda: "# md")() == "# md"
+
+
+# ---------------------------------------------------------------- config do projeto
+
+CONFIG = {"indice-padrao": "app", "indices": {"app": {
+    "padrao": "logs-*", "campo-tempo": "ts", "fixos": {"sis": "x*"},
+    "campos": {"nivel": "log.level", "mensagem": "message", "logger": "log.logger", "thread": "proc.thread"}}},
+    "consultas": {"Por NB": {"id": "s1"}}, "download": {"path": "downloads/elk"}}
+
+
+@pytest.fixture
+def projeto(tmp_path):
+    server.elk_configurar(str(tmp_path), CONFIG)
+    return str(tmp_path)
+
+
+def test_configurar_valida_e_grava(tmp_path):
+    with pytest.raises(Erro, match="indices.app.padrao"):
+        server.elk_configurar(str(tmp_path), {"indice-padrao": "app", "indices": {"app": {"campo-tempo": "ts"}}})
+    with pytest.raises(Erro, match="indice-padrao"):
+        server.elk_configurar(str(tmp_path), {**CONFIG, "indice-padrao": "outro"})
+    out = server.elk_configurar(str(tmp_path), CONFIG, ambiente="hml")
+    assert out == {"arquivo": ".kiro/config/elk/elk-homol.json"}
+    gravado = json.loads((tmp_path / out["arquivo"]).read_text("utf-8"))
+    assert list(gravado)[0] == "$schema" and gravado["indices"] == CONFIG["indices"]
+
+
+def test_config_aplica_fixos_apelidos_e_parametros(fake, projeto):
+    fake.routes[("POST", f"{KIBANA}/internal/search/es")] = (200, {"rawResponse": {"hits": {"total": 3, "hits": []}}})
+    out = server.elk_contar("now-1h", projeto=projeto, campos={"nivel": "ERROR"}, consulta="mensagem:*timeout* and n > 0")
+    sent = body(fake.calls[-1])["params"]
+    assert sent["index"] == "logs-*" and out["total"] == 3
+    assert sent["body"]["query"] == {"bool": {
+        "must": [{"query_string": {"query": "message:*timeout* AND n:>0"}}],
+        "filter": [{"wildcard": {"sis": {"value": "x*"}}}, {"term": {"log.level": "ERROR"}},
+                   {"range": {"ts": {"gte": "now-1h", "lte": "now"}}}]}}
+
+    salva = {"id": "s1", "type": "search", "attributes": {"title": "Por NB", "description": "Parâmetros: nb",
+        "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({"query": {"query": "a: 1 and b: 2", "language": "kuery"},
+            "filter": [{"meta": {}, "query": {"match_phrase": {"nb": 0}}}, {"meta": {}, "query": {"term": {"c": 1}}}]})}},
+        "references": []}
+    fake.routes[("GET", f"{KIBANA}/api/spaces/space")] = (200, [{"id": "default"}])
+    fake.routes[("GET", f"{KIBANA}/api/saved_objects/search/s1")] = (200, salva)
+    with pytest.raises(Erro, match="exige parâmetro"):
+        server.elk_contar("now-1h", projeto=projeto, salva="por nb")
+    server.elk_contar("now-1h", projeto=projeto, salva="Por NB", campos={"nb": 123})
+    q = body(fake.calls[-1])["params"]["body"]["query"]["bool"]
+    assert q["must"] == [{"query_string": {"query": "(a: 1 AND b: 2)"}}]
+    assert q["filter"][:3] == [{"wildcard": {"sis": {"value": "x*"}}}, {"term": {"nb": 123}}, {"term": {"c": 1}}]
+
+
+def test_sem_config_exige_indice(fake, tmp_path):
+    with pytest.raises(Erro, match="elk_configurar"):
+        server.elk_contar("now-1h", projeto=str(tmp_path), consulta="x")
+
+
+def test_exportar_por_assunto(fake, projeto, monkeypatch):
+    fake.routes[("POST", f"{KIBANA}/internal/search/es")] = (200, {"rawResponse": {"hits": {"total": 1, "hits": [
+        _hit(1, 10)]}}})
+    out = server.elk_exportar_csv("now-1h", projeto=projeto, assunto="erros-x", consulta="x", retornar=["mensagem"])
+    assert out["arquivo"].startswith("downloads/elk/") and out["arquivo"].endswith("_erros-x.csv")
+    assert out["colunas"] == ["message"]
+
+
+def test_contar_comparar(fake, projeto):
+    def search(req):
+        b = body(req)["params"]["body"]
+        ref = "-1d" in b["query"]["bool"]["filter"][-1]["range"]["ts"]["gte"]
+        buckets = [{"key": "ERROR", "doc_count": 5}] if ref else [{"key": "ERROR", "doc_count": 50},
+                                                                   {"key": "FATAL", "doc_count": 2}]
+        return 200, {"rawResponse": {"hits": {"total": 10 if ref else 60}, "aggregations": {"grupos": {"buckets": buckets}}}}
+
+    fake.routes[("POST", f"{KIBANA}/internal/search/es")] = search
+    out = server.elk_contar("now-1h", projeto=projeto, campos={"nivel": "*"}, agrupar_por="nivel", comparar="1d")
+    assert out["referencia"] == {"inicio": "now-1h-1d", "fim": "now-1d", "total": 10}
+    assert out["grupos"] == [{"valor": "ERROR", "total": 50, "ref": 5, "novo": False},
+                             {"valor": "FATAL", "total": 2, "ref": 0, "novo": True}]
+
+
+# ---------------------------------------------------------------- job Spring Batch
+
+def _linhas_job():
+    L = "br.app.StepLoggerListener"
+    ev = [("main", "br.app.JobLoggerListener", "INFO", "Iniciando processamento do JOB: carga na data 09/10/2026 11:43:42"),
+          ("main", L, "INFO", "Iniciando step: prepara na data 09/10/2026 11:43:42"),
+          ("main", L, "INFO", "##### SUMÁRIO DE EXECUCAO #####"),
+          ("main", L, "INFO", "Situação do step:                COMPLETED"),
+          ("main", L, "INFO", "Total de linhas lidas:           7"),
+          ("main", L, "INFO", "Finalizando step: prepara na data 09/10/2026 11:43:43 com duração de 00:00:01"),
+          ("main", L, "INFO", "Iniciando step: grava na data 09/10/2026 11:43:43")]
+    for p in (0, 1):
+        ev.append((f"exec-{p}", L, "INFO", f"Iniciando step: grava:partition{p} na data 09/10/2026 11:43:44"))
+    for p in (0, 1):  # sumários intercalados entre threads
+        ev.append((f"exec-{p}", L, "INFO", "##### SUMÁRIO DE EXECUCAO #####"))
+    for p in (0, 1):
+        ev.append((f"exec-{p}", L, "INFO", "Situação do step:                COMPLETED"))
+        ev.append((f"exec-{p}", L, "INFO", f"Total de linhas lidas:           {10 + p}"))
+        ev.append((f"exec-{p}", L, "INFO", "Total de rollback:               0"))
+    ev.append(("exec-1", "br.app.Repo", "ERROR", "Timeout 123 no banco"))
+    ev.append(("exec-0", "br.app.Repo", "ERROR", "Timeout 456 no banco"))
+    for p in (0, 1):
+        ev.append((f"exec-{p}", L, "INFO", f"Finalizando step: grava:partition{p} na data 09/10/2026 11:44:00 com duração de 00:00:16"))
+    ev += [("main", L, "INFO", "##### SUMÁRIO DE EXECUCAO #####"), ("main", L, "INFO", "Total de linhas lidas:           21"),
+           ("main", L, "INFO", "Finalizando step: grava na data 09/10/2026 11:44:01 com duração de 00:00:18"),
+           ("main", "br.app.JobLoggerListener", "INFO",
+            "Finalizando processamento do JOB: carga na data 09/10/2026 11:44:32, com status COMPLETED")]
+    return [{"@timestamp": f"2026-10-09T14:{43 + i // 60:02d}:{i % 60:02d}.000Z", "thread_name": t, "logger_name": lg,
+             "level": lv, "message": m} for i, (t, lg, lv, m) in enumerate(ev)]
+
+
+def test_job_local_consolida_particoes(tmp_path):
+    log = tmp_path / "app.log"
+    antes = {"@timestamp": "2026-10-09T10:00:00Z", "thread_name": "main", "logger_name": "x.JobLoggerListener",
+             "level": "INFO", "message": "Iniciando processamento do JOB: outro na data 09/10/2026 07:00:00"}
+    log.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in [antes, *_linhas_job()]), "utf-8")
+    md = server.elk_job(job="carga", log_local=str(log))
+    assert "# Execução — carga (local)" in md and "✅ COMPLETED" in md and "Duração: 0:00:50" in md
+    assert "| Partições | 2 (consolidadas) |" in md
+    assert "| Linhas lidas / filtradas / gravadas | 21 /" in md  # 10 + 11, igual ao sumário do manager
+    assert "Divergência" not in md and md.index("| prepara |") < md.index("| grava |")
+    assert "| ERROR | Repo | 2× |" in md and "| grava |" in md.split("WARN / ERROR")[1]
+    assert server.elk_job(log_local=str(log)).startswith("# Execução — carga")  # último job executado
+
+
+def test_job_elk(fake, projeto):
+    eventos = _linhas_job()
+
+    def hit(i, e):
+        return {"_id": str(i), "_index": "l", "sort": [i], "_source": {
+            "ts": e["@timestamp"], "message": e["message"], "log": {"logger": e["logger_name"], "level": e["level"]},
+            "proc": {"thread": e["thread_name"]}}}
+
+    def search(req):
+        b = body(req)["params"]["body"]
+        q = b["query"]["bool"]["must"][0]["query_string"]["query"]
+        if "processamento" in q:
+            hits = [hit(i, e) for i, e in enumerate(eventos) if "processamento do JOB" in e["message"]][::-1]
+        elif "LoggerListener" in q:
+            hits = [hit(i, e) for i, e in enumerate(eventos) if "LoggerListener" in e["logger_name"]]
+        else:
+            hits = [hit(i, e) for i, e in enumerate(eventos) if e["level"] == "ERROR"]
+        return 200, {"rawResponse": {"hits": {"total": len(hits), "hits": hits}}}
+
+    fake.routes[("POST", f"{KIBANA}/internal/search/es")] = search
+    md = server.elk_job(projeto=projeto, job="carga")
+    assert "(prod)" in md and "| Partições | 2 (consolidadas) |" in md and "| ERROR | Repo | 2× |" in md
+    janela = body(fake.calls[1])["params"]["body"]["query"]["bool"]["filter"][-1]["range"]["ts"]
+    assert janela["gte"].endswith("||-5s") and janela["lte"].endswith("||+5s")
