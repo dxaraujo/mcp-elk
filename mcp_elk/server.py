@@ -50,7 +50,9 @@ mcp = MCPServer("elk", instructions=(
     "ELK ou, se o pedido disser local, do arquivo de log em log_local. A tabela já vem partição a partição: mostre-a "
     "como veio, sem montar outra; dúvida nos números se confere no CSV que ele grava.\n"
     "Configurar: elk_listar_indices → o usuário escolhe; recorte (fixos) pelo nome do sistema (amostra com "
-    "elk_buscar_logs limite 1, confirme com elk_contar); apelidos a partir de 1–3 documentos; valores com "
+    "elk_buscar_logs limite 1, confirme com elk_contar); apelidos a partir de 1–3 documentos; campo-tempo: no "
+    "documento de amostra, o timestamp gravado pela aplicação (fração até ns, ex.: app.@timestamp) quando houver, "
+    "não o da ingestão (@timestamp do data view, só ms): é ele que ordena as linhas do elk_job; valores com "
     "elk_contar(agrupar_por); mostre o JSON, confirme e grave com elk_configurar.\n"
     "Logs têm dados pessoais: mostre só o necessário. Nunca leia ~/.config/mcp-elk/elk.properties (tem a senha).\n"
     "Resposta: {\"ok\":true,\"dados\":...} ou {\"ok\":false,\"erro\":{\"codigo\",\"detalhe\",\"campo\"}}; siga o "
@@ -584,8 +586,13 @@ def elk_job(projeto: Projeto = None,
     q = _query(j_ini, j_fim, f"{logger}:*LoggerListener*", alvo.fixos, None, alvo.tempo)
     eventos = [{"ts": r.get(alvo.tempo, ""), "thread": r.get(thread, "") if thread else "", "logger": r.get(logger, ""),
                 "msg": r.get(msg) or "", "level": ""} for r in _documentos(alvo, q, ret, MAX_JOB, estado)]
-    eventos, _ = jb.recortar(eventos, ini[1])
     avisos = [f"mais de {MAX_JOB} eventos de listener: sumário parcial"] if estado["truncado"] else []
+    # o ES ordena só até o ms; o valor guardado do campo de tempo (o da aplicação) tem a fração inteira, até ns
+    try:
+        eventos.sort(key=lambda e: jb.chave_ordem(e["ts"]))
+    except ValueError:
+        avisos.append(f"campo de tempo '{alvo.tempo}' sem data ISO em alguma linha: ordem do ES, até o ms")
+    eventos, _ = jb.recortar(eventos, ini[1])
     if projeto:  # a tabela sai do arquivo baixado, que fica para conferência (log_local relê)
         pasta = ((alvo.cfg or {}).get("download") or {}).get("path") or ".kiro/local/elk"
         path = prj.raiz(projeto) / pasta / f"{datetime.now():%Y%m%d-%H%M}_job-{ini[1]}.csv"
@@ -900,7 +907,9 @@ def elk_configurar(projeto: Annotated[str, Field(description="caminho absoluto d
                        "download?{path relativo}}"))],
                    ambiente: Ambiente = None) -> dict:
     """Valida e grava a config do ambiente (.kiro/config/elk/elk-<ambiente>.json), substituindo o arquivo: envie o
-    JSON completo, já mostrado e confirmado pelo usuário; todo campo e valor veio de uma tool. → dados: {arquivo}"""
+    JSON completo, já mostrado e confirmado pelo usuário; todo campo e valor veio de uma tool. campo-tempo: o
+    timestamp gravado pela aplicação (fração até ns) quando o documento tiver, não o @timestamp da ingestão (só ms).
+    → dados: {arquivo}"""
     amb = _ambiente(ambiente)
     return {"arquivo": _relativo(prj.gravar(projeto, amb, config), projeto)}
 

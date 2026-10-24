@@ -524,7 +524,7 @@ def test_job_particoes_embaralhadas_no_mesmo_ms():
     md = jb.relatorio(ev, None, "prod")
     assert "| prep | COMPLETED | 1 |" in md and "| expStep | COMPLETED | 303 |" in md
     assert "| ↳ partition2 | COMPLETED | 102 |" in md and "| ↳ **Σ 3 partições** | COMPLETED | 303 |" in md
-    assert "expWorker" not in md and "2 steps · lidas 304 · gravadas 304" in md
+    assert "expWorker" not in md and "steps · lidas" not in md  # sem total geral entre steps
 
 
 def test_job_elk(fake, projeto):
@@ -555,3 +555,10 @@ def test_job_elk(fake, projeto):
     assert len(csvs) == 1 and csvs[0].relative_to(projeto).as_posix() in md  # baixado e citado no relatório
     refeito = server.elk_job(log_local=str(csvs[0]), erros=False)
     assert refeito.split("## Steps")[1] == md.split("## Steps")[1].split("## WARN")[0].rstrip("\n")
+
+
+def test_chave_ordem_fracao_de_tamanho_variavel():
+    ts = ["2026-10-23T07:31:54.76237-03:00", "2026-10-23T07:31:54.762370769-03:00", "2026-10-23T07:31:54.8-03:00",
+          "2026-10-23T10:31:55Z"]
+    assert sorted(ts[::-1], key=jb.chave_ordem) == ts
+    assert jb.chave_ordem("9765222") < jb.chave_ordem("9766231")  # log.offset

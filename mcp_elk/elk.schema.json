@@ -68,7 +68,7 @@
         },
         "campo-tempo": {
           "type": "string",
-          "description": "Campo de tempo do data view (vai em `campo_tempo`).",
+          "description": "Campo de tempo (vai em `campo_tempo`): de preferência o timestamp gravado pela aplicação, com fração até ns, que ordena as linhas; o da ingestão só tem ms e embaralha as do mesmo ms.",
           "minLength": 1
         },
         "fixos": {

@@ -34,6 +34,18 @@ def _sem_acento(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower().strip()
 
 
+def chave_ordem(valor) -> tuple:
+    """Chave de ordenação de um valor de tempo: data ISO com fração de qualquer tamanho (até ns) ou número."""
+    texto = str(valor).strip()
+    if texto.isdigit():
+        return (int(texto), 0)
+    m = re.match(r"^(.+?T\d\d:\d\d:\d\d)(?:[.,](\d+))?(.*)$", texto)
+    if not m:
+        raise ValueError(f"valor de `ordem` não é número nem data ISO: {texto}")
+    dt = datetime.fromisoformat(m[1] + (m[3] or "").replace("Z", "+00:00"))
+    return (int(dt.timestamp()), int((m[2] or "0").ljust(9, "0")[:9]))
+
+
 def gravar_csv(eventos: list[dict], path: Path) -> None:
     """Eventos em CSV (UTF-8 com BOM), na ordem recebida; `ler_local` lê de volta."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,8 +118,7 @@ def _steps(eventos: list[dict]) -> tuple[dict, dict]:
             livres = [n for n in fila[thread] if "sumario" not in steps[n]]
             if not livres:
                 return
-            # shortcut: steps da mesma thread no mesmo milissegundo podem trocar contadores; só um campo de
-            # sequência do log (ex.: log.offset) desempata
+            # campo de tempo só em ms (ex.: o da ingestão): steps da mesma thread no mesmo ms podem trocar contadores
             nome = next((n for n in livres if steps[n]["ts_ini"] <= ts), livres[0])
             steps[nome]["sumario"] = aberto[thread] = {}
         aberto[thread][chave] = valor
@@ -214,12 +225,12 @@ def relatorio(eventos: list[dict], erros: list[dict] | None, origem: str, aviso:
         if s["particoes"]:
             aviso_soma = " ⚠️ ≠ sumário do step" if s["diverge"] else ""
             out.append(linha(f"↳ **Σ {len(s['particoes'])} partições**{aviso_soma}", s["soma"], None))
+    # sem total geral: somar lidas/gravadas de steps diferentes não tem sentido de negócio
     dados = [s.get("sumario") or s.get("soma") or {} for s in lista]  # o step carrega o total das suas partições
     alerta = [s["nome"] for s, d in zip(lista, dados) if d.get("rollback") or any(
         d.get(k) for k in ("skip_leitura", "skip_processamento", "skip_gravacao"))]
-    total = lambda k: _n(sum(d.get(k) or 0 for d in dados))  # noqa: E731
-    out += ["", f"{len(lista)} steps · lidas {total('lidas')} · gravadas {total('gravadas')}"
-            + (f" · ⚠️ skip/rollback em: {', '.join(alerta)}" if alerta else "")]
+    if alerta:
+        out += ["", f"⚠️ skip/rollback em: {', '.join(alerta)}"]
     if erros is None:
         return "\n".join(out)
     out += ["", "## WARN / ERROR na janela", ""]
