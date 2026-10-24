@@ -18,10 +18,9 @@ FIM_JOB = re.compile(r"Finalizando processamento do JOB:\s*(\S+)\s+na data\s+(.+
 DURACAO_JOB = re.compile(r"JOB:\s*(\S+)\s+executado com dura\S+o:?\s*(\d+:\d\d:\d\d)")
 INICIO_STEP = re.compile(r"Iniciando step:\s*(\S+)\s+na data\s+(.+?)\s*$")
 FIM_STEP = re.compile(r"Finalizando step:\s*(\S+)\s+na data\s+(.+?)\s+com dura\S+o de\s+(\d+:\d\d:\d\d)")
-SUMARIO = re.compile(r"SUM.RIO DE EXECU", re.I)
 SITUACAO = re.compile(r"Situa\S+o do step:\s*(\w+)")
 TOTAL = re.compile(r"Total de ([^:]+?):\s*(\d+)")
-PARTICAO = re.compile(r"^(.+?):partition\d+$")
+PARTICAO = re.compile(r"^(.+?):partition(\d+)$")
 CONTADORES = {"linhas lidas": "lidas", "skips na leitura": "skip_leitura", "linhas filtradas": "filtradas",
               "linhas gravadas": "gravadas", "skips na gravacao": "skip_gravacao",
               "skips no processamento": "skip_processamento", "commits": "commits", "rollback": "rollback"}
@@ -79,11 +78,26 @@ def _dt(texto: str) -> datetime | None:
 
 
 def _steps(eventos: list[dict]) -> tuple[dict, dict]:
-    """{step: {inicio, fim, duracao, ts_ini, ts_fim, sumarios[]}} na ordem de início + dados do job."""
+    """{step: {inicio, fim, duracao, ts_ini, ts_fim, sumario}} + dados do job. No ELK as linhas do sumário são documentos
+    soltos e as do mesmo milissegundo vêm em qualquer ordem: o sumário é montado por thread, sem depender do cabeçalho
+    nem do "Finalizando step"; contador repetido abre o bloco seguinte, que vai para o step iniciado mais antigo da
+    thread ainda sem sumário."""
     steps: dict[str, dict] = {}
     job: dict = {}
-    pendente: dict[str, dict] = {}  # thread -> sumário aberto
-    atual: dict[str, str] = {}  # thread -> último step iniciado
+    fila: dict[str, list] = defaultdict(list)  # thread -> steps iniciados nela, em ordem
+    aberto: dict[str, dict] = {}  # thread -> sumário em montagem
+
+    def contar(thread: str, ts: str, chave: str, valor) -> None:
+        if thread not in aberto or chave in aberto[thread]:
+            livres = [n for n in fila[thread] if "sumario" not in steps[n]]
+            if not livres:
+                return
+            # shortcut: steps da mesma thread no mesmo milissegundo podem trocar contadores; só um campo de
+            # sequência do log (ex.: log.offset) desempata
+            nome = next((n for n in livres if steps[n]["ts_ini"] <= ts), livres[0])
+            steps[nome]["sumario"] = aberto[thread] = {}
+        aberto[thread][chave] = valor
+
     for e in eventos:
         thread = e.get("thread") or ""
         for linha in (e["msg"] or "").splitlines():
@@ -94,58 +108,46 @@ def _steps(eventos: list[dict]) -> tuple[dict, dict]:
             elif m := DURACAO_JOB.search(linha):
                 job["duracao"] = m[2]
             elif m := INICIO_STEP.search(linha):
-                s = steps.setdefault(m[1], {"sumarios": []})
-                s.update(inicio=m[2], ts_ini=e["ts"])
-                atual[thread] = m[1]
+                steps.setdefault(m[1], {}).update(inicio=m[2], ts_ini=e["ts"])
+                fila[thread].append(m[1])
             elif m := FIM_STEP.search(linha):
-                s = steps.setdefault(m[1], {"sumarios": []})
-                s.update(fim=m[2], duracao=m[3], ts_fim=e["ts"])
-                if thread in pendente:
-                    s["sumarios"].append(pendente.pop(thread))
-            elif SUMARIO.search(linha):
-                if thread in pendente and thread in atual:  # bloco anterior sem "Finalizando step"
-                    steps[atual[thread]]["sumarios"].append(pendente.pop(thread))
-                pendente[thread] = {}
-            elif thread in pendente and (m := SITUACAO.search(linha)):
-                pendente[thread]["situacao"] = m[1]
-            elif thread in pendente and (m := TOTAL.search(linha)):
-                if chave := CONTADORES.get(_sem_acento(m[1])):
-                    pendente[thread][chave] = int(m[2])
-    for thread, bloco in pendente.items():
-        if thread in atual:
-            steps[atual[thread]]["sumarios"].append(bloco)
+                steps.setdefault(m[1], {}).update(fim=m[2], duracao=m[3], ts_fim=e["ts"])
+            elif m := SITUACAO.search(linha):
+                contar(thread, e["ts"], "situacao", m[1])
+            elif (m := TOTAL.search(linha)) and (chave := CONTADORES.get(_sem_acento(m[1]))):
+                contar(thread, e["ts"], chave, int(m[2]))
     return steps, job
 
 
 def _consolidar(steps: dict) -> list[dict]:
-    """Partições (`step:partitionN`) somadas no step manager; diverge = soma das partições ≠ sumário do manager."""
-    grupos: dict[str, dict] = {}
-    for nome, s in steps.items():
-        base = m[1] if (m := PARTICAO.match(nome)) else nome
-        g = grupos.setdefault(base, {"nome": base, "particoes": [], "manager": None})
-        if m:
-            g["particoes"].append(s)
-        else:
-            g["manager"] = s
-    out = []
-    for g in grupos.values():
-        man = g["manager"] or {}
-        if g["particoes"]:
-            blocos = [b for p in g["particoes"] for b in p["sumarios"]]
+    """Steps na ordem de início, cada um com suas partições (`X:partitionN`, em ordem de N). O dono das partições é o
+    step de nome X ou, quando o worker tem outro nome, o último step iniciado antes delas (o manager)."""
+    ordem = sorted(steps.items(), key=lambda kv: kv[1].get("ts_ini", ""))
+    topo = {n: {"nome": n, **s, "particoes": []} for n, s in ordem if not PARTICAO.match(n)}
+    grupos: dict[str, list] = defaultdict(list)
+    for n, s in ordem:
+        if m := PARTICAO.match(n):
+            grupos[m[1]].append({"nome": f"partition{m[2]}", "n": int(m[2]), **s})
+    for base, parts in grupos.items():
+        parts.sort(key=lambda p: p["n"])
+        primeira = min(p.get("ts_ini", "") for p in parts)
+        dono = base if base in topo else next(
+            (n for n, s in reversed(topo.items()) if s.get("ts_ini", "") <= primeira), None)
+        if dono is None:  # manager sem linha de início
+            dono = base
+            topo[base] = {"nome": base, "ts_ini": primeira, "particoes": []}
+        topo[dono]["particoes"] += parts
+        topo[dono].setdefault("ts_fim", max((p.get("ts_fim", "") for p in parts), default=""))
+    for s in topo.values():
+        if s["particoes"]:
+            blocos = [p.get("sumario") or {} for p in s["particoes"]]
             soma = {k: sum(b.get(k, 0) for b in blocos) for k in CONTADORES.values()}
             situacoes = {b.get("situacao") for b in blocos} - {None}
             soma["situacao"] = "COMPLETED" if situacoes == {"COMPLETED"} else ", ".join(sorted(situacoes)) or "?"
-            agregado = man.get("sumarios", [None])[-1] if man.get("sumarios") else None
-            diverge = agregado is not None and any(agregado.get(k) not in (None, soma[k]) for k in CONTADORES.values())
-            dados = agregado if diverge else soma
-            primeira = min(g["particoes"], key=lambda p: p.get("ts_ini", ""))
-        else:
-            dados, diverge, primeira = (man.get("sumarios") or [{}])[-1], False, man
-        out.append({"nome": g["nome"], "dados": dados, "particoes": len(g["particoes"]), "diverge": diverge,
-                    "inicio": man.get("inicio") or primeira.get("inicio"), "duracao": man.get("duracao"),
-                    "ts_ini": man.get("ts_ini") or primeira.get("ts_ini", ""),
-                    "ts_fim": man.get("ts_fim") or max((p.get("ts_fim", "") for p in g["particoes"]), default="")})
-    return sorted(out, key=lambda s: s["ts_ini"])
+            s["soma"] = soma
+            man = s.get("sumario") or {}
+            s["diverge"] = any(man.get(k) not in (None, soma[k]) for k in CONTADORES.values())
+    return sorted(topo.values(), key=lambda s: s.get("ts_ini", ""))
 
 
 def _n(v) -> str:
@@ -182,26 +184,28 @@ def relatorio(eventos: list[dict], erros: list[dict] | None, origem: str, aviso:
            f"Duração: {duracao or '?'}"]
     if aviso:
         out += ["", f"> {aviso}"]
-    out += ["", "## Steps", ""]
+    out += ["", "## Steps", "", "| Step | Situação | Lidas | Filtradas | Gravadas | Skips | Commits | Rollback | Duração |",
+            "|---|---|--:|--:|--:|--:|--:|--:|---|"]
+
+    def linha(nome: str, d: dict, duracao: str | None) -> str:
+        skips = [d[k] for k in ("skip_leitura", "skip_processamento", "skip_gravacao") if k in d]
+        return (f"| {nome} | {d.get('situacao', '?')} | {_n(d.get('lidas'))} | {_n(d.get('filtradas'))} | "
+                f"{_n(d.get('gravadas'))} | {_n(sum(skips) if skips else None)} | {_n(d.get('commits'))} | "
+                f"{_n(d.get('rollback'))} | {duracao or '?'} |")
+
     for s in lista:
-        d = s["dados"] or {}
-        out += [f"| {s['nome']} | |", "|---|---|", f"| Situação | {d.get('situacao', '?')} |",
-                f"| Linhas lidas / filtradas / gravadas | {_n(d.get('lidas'))} / {_n(d.get('filtradas'))} / "
-                f"{_n(d.get('gravadas'))} |",
-                f"| Skips (leitura / processamento / gravação) | {_n(d.get('skip_leitura'))} / "
-                f"{_n(d.get('skip_processamento'))} / {_n(d.get('skip_gravacao'))} |",
-                f"| Commits / rollback | {_n(d.get('commits'))} / {_n(d.get('rollback'))} |",
-                f"| Início · duração | {s['inicio'] or '?'} · {s['duracao'] or '?'} |"]
+        out.append(linha(s["nome"], s.get("sumario") or {}, s.get("duracao")))
+        for p in s["particoes"]:
+            out.append(linha(f"↳ {p['nome']}", p.get("sumario") or {}, p.get("duracao")))
         if s["particoes"]:
-            out.append(f"| Partições | {s['particoes']} (consolidadas) |")
-        if s["diverge"]:
-            out.append("| ⚠️ Divergência | soma das partições ≠ sumário do manager; mostrado o do manager |")
-        out.append("")
-    alerta = [s["nome"] for s in lista if (s["dados"] or {}).get("rollback") or any(
-        (s["dados"] or {}).get(k) for k in ("skip_leitura", "skip_processamento", "skip_gravacao"))]
-    total = lambda k: _n(sum((s["dados"] or {}).get(k) or 0 for s in lista))  # noqa: E731
-    out.append(f"{len(lista)} steps · lidas {total('lidas')} · gravadas {total('gravadas')}"
-               + (f" · ⚠️ skip/rollback em: {', '.join(alerta)}" if alerta else ""))
+            aviso_soma = " ⚠️ ≠ sumário do step" if s["diverge"] else ""
+            out.append(linha(f"↳ **Σ {len(s['particoes'])} partições**{aviso_soma}", s["soma"], None))
+    dados = [s.get("sumario") or s.get("soma") or {} for s in lista]  # o step carrega o total das suas partições
+    alerta = [s["nome"] for s, d in zip(lista, dados) if d.get("rollback") or any(
+        d.get(k) for k in ("skip_leitura", "skip_processamento", "skip_gravacao"))]
+    total = lambda k: _n(sum(d.get(k) or 0 for d in dados))  # noqa: E731
+    out += ["", f"{len(lista)} steps · lidas {total('lidas')} · gravadas {total('gravadas')}"
+            + (f" · ⚠️ skip/rollback em: {', '.join(alerta)}" if alerta else "")]
     if erros is None:
         return "\n".join(out)
     out += ["", "## WARN / ERROR na janela", ""]
@@ -217,8 +221,8 @@ def relatorio(eventos: list[dict], erros: list[dict] | None, origem: str, aviso:
             "| Nível | Origem | Ocorrências | 1ª | Última | Mensagem (resumo) | Step |", "|---|---|---|---|---|---|---|"]
     for (nivel, logger, _), evs in sorted(grupos.items(), key=lambda kv: (kv[0][0] != "ERROR", -len(kv[1]))):
         evs.sort(key=lambda e: e["ts"])
-        step = next((s["nome"] for s in lista if s["ts_ini"] and s["ts_ini"] <= evs[0]["ts"] <= (s["ts_fim"] or "~")),
-                    "")
+        step = next((s["nome"] for s in lista
+                     if s.get("ts_ini") and s["ts_ini"] <= evs[0]["ts"] <= (s.get("ts_fim") or "~")), "")
         resumo = ((evs[0]["msg"] or "").strip().splitlines() or [""])[0][:150].replace("|", "\\|")
         out.append(f"| {nivel} | {logger.rsplit('.', 1)[-1]} | {len(evs)}× | {_hora(evs[0]['ts'])} | "
                    f"{_hora(evs[-1]['ts'])} | {resumo} | {step} |")

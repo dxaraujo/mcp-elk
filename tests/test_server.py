@@ -7,6 +7,7 @@ import requests
 from requests.adapters import BaseAdapter
 
 from mcp_elk import config, server
+from mcp_elk import job as jb
 from mcp_elk.config import ElkConfig
 from mcp_elk.contrato import Erro
 
@@ -492,11 +493,38 @@ def test_job_local_consolida_particoes(tmp_path):
     log.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in [antes, *_linhas_job()]), "utf-8")
     md = server.elk_job(job="carga", log_local=str(log))
     assert "# Execução — carga (local)" in md and "✅ COMPLETED" in md and "Duração: 0:00:50" in md
-    assert "| Partições | 2 (consolidadas) |" in md
-    assert "| Linhas lidas / filtradas / gravadas | 21 /" in md  # 10 + 11, igual ao sumário do manager
-    assert "Divergência" not in md and md.index("| prepara |") < md.index("| grava |")
+    assert "| grava | ? | 21 |" in md and "| ↳ partition0 | COMPLETED | 10 |" in md
+    assert "| ↳ partition1 | COMPLETED | 11 |" in md and "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md  # = manager
+    assert "⚠️" not in md.split("## WARN")[0] and md.index("| prepara |") < md.index("| grava |")
     assert "| ERROR | Repo | 2× |" in md and "| grava |" in md.split("WARN / ERROR")[1]
     assert server.elk_job(log_local=str(log)).startswith("# Execução — carga")  # último job executado
+
+
+def test_job_particoes_embaralhadas_no_mesmo_ms():
+    """ELK: cada linha do sumário é um documento e as do mesmo ms chegam em qualquer ordem; o worker tem outro nome."""
+    L, ts = "x.StepLoggerListener", "2026-10-23T10:31:55.490Z"
+
+    def sumario(thread, n, t, commits=1):
+        return [{"ts": t, "thread": thread, "logger": L, "level": "", "msg": m} for m in (
+            f"Total de linhas gravadas:        {n}", "Situação do step:                COMPLETED",
+            "##### SUMÁRIO DE EXECUCAO #####", f"Total de linhas lidas:           {n}", f"Total de commits:   {commits}")]
+    ev = [{"ts": "2026-10-23T10:31:54.000Z", "thread": "main", "logger": L, "level": "",
+           "msg": "Iniciando processamento do JOB: exp na data 23/10/2026 07:31:54"}]
+    ev += [{"ts": ts, "thread": "main", "logger": L, "level": "", "msg": f"Iniciando step: {n} na data 23/10/2026 07:31:54"}
+           for n in ("prep", "expStep")]
+    ev += sumario("main", 1, ts)[:2]  # sumário do prep partido em volta do início do manager
+    ev.insert(2, sumario("main", 1, ts)[3])
+    ev += sumario("main", 1, ts)[2:3] + sumario("main", 1, ts)[4:]
+    for p in range(3):
+        ev.append({"ts": "2026-10-23T10:31:56.000Z", "thread": f"exec-{p}", "logger": L, "level": "",
+                   "msg": f"Iniciando step: expWorker:partition{p} na data 23/10/2026 07:31:56"})
+    for p in range(3):
+        ev += sumario(f"exec-{p}", 100 + p, "2026-10-23T10:33:50.000Z")[::-1]
+    ev += sumario("main", 303, "2026-10-23T10:33:54.000Z", commits=3)
+    md = jb.relatorio(ev, None, "prod")
+    assert "| prep | COMPLETED | 1 |" in md and "| expStep | COMPLETED | 303 |" in md
+    assert "| ↳ partition2 | COMPLETED | 102 |" in md and "| ↳ **Σ 3 partições** | COMPLETED | 303 |" in md
+    assert "expWorker" not in md and "2 steps · lidas 304 · gravadas 304" in md
 
 
 def test_job_elk(fake, projeto):
@@ -520,6 +548,6 @@ def test_job_elk(fake, projeto):
 
     fake.routes[("POST", f"{KIBANA}/internal/search/es")] = search
     md = server.elk_job(projeto=projeto, job="carga")
-    assert "(prod)" in md and "| Partições | 2 (consolidadas) |" in md and "| ERROR | Repo | 2× |" in md
+    assert "(prod)" in md and "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md and "| ERROR | Repo | 2× |" in md
     janela = body(fake.calls[1])["params"]["body"]["query"]["bool"]["filter"][-1]["range"]["ts"]
     assert janela["gte"].endswith("||-5s") and janela["lte"].endswith("||+5s")

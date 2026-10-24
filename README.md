@@ -106,7 +106,7 @@ Parâmetros comuns: `projeto`, `ambiente` (prod/produção — padrão —, homo
 | `elk_contar(..., agrupar_por?, top=10, comparar?)` | Dimensionar; os valores mais frequentes; `comparar='1d'` conta também a mesma janela antes e marca o que é `novo` (diagnóstico) |
 | `elk_buscar_logs(..., limite=10≤100, retornar?)` | Poucos documentos na conversa: itens achatados, textos cortados em 15 linhas / 1.500 caracteres; `retornar` padrão = tempo + nivel, servico, logger, mensagem |
 | `elk_exportar_csv(..., assunto? \| arquivo?, retornar?, max_linhas=100000)` | Volume grande: pagina e grava o CSV (em `download.path/<AAAAMMDD-HHmm>_<assunto>.csv`) sem passar documentos pela conversa |
-| `elk_job(job?, inicio=now-7d, log_local?, erros=true)` | Última execução de job Spring Batch: sumário por step (partições consolidadas pela thread, conferidas com o manager) e WARN/ERROR agrupados, em Markdown; do ELK (apelidos `mensagem`, `logger`, `thread`, `nivel`) ou de log local JSONL/texto |
+| `elk_job(job?, inicio=now-7d, log_local?, erros=true)` | Última execução de job Spring Batch: tabela por step com uma linha por partição e a soma delas, conferida com o step e WARN/ERROR agrupados, em Markdown; do ELK (apelidos `mensagem`, `logger`, `thread`, `nivel`) ou de log local JSONL/texto |
 | `elk_listar_consultas(busca?, espaco?)` | Buscas salvas e saved queries do Kibana (todos os spaces, ou só `espaco`) |
 | `elk_obter_consulta(salva)` | Detalhes de uma consulta salva |
 | `elk_criar_consulta(titulo, ...)` | Cria busca salva do Discover (fixos + `campos` viram pílulas; `consulta` na barra, kuery ou lucene) e registra o título na config |
