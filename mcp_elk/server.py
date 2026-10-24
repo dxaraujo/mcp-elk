@@ -560,7 +560,8 @@ def elk_job(projeto: Projeto = None,
     """Última execução de um job Spring Batch: acha início e fim, baixa as linhas dos listeners de job e step
     ("...LoggerListener") em CSV no download.path da config (padrão .kiro/local/elk) e monta dele a tabela por step,
     uma linha por partição e a soma, mais WARN/ERROR agrupados. No ELK usa os apelidos mensagem, logger, thread e
-    nivel da config; `log_local` aceita esse CSV para refazer o sumário.
+    nivel da config; o relatório também fica em .md ao lado do CSV; `log_local` aceita esse CSV para refazer o
+    sumário.
     → Markdown pronto: mostre a tabela como veio, sem refazer nem resumir"""
     if log_local:
         eventos, nome = jb.recortar(jb.ler_local(log_local), job)
@@ -595,7 +596,8 @@ def elk_job(projeto: Projeto = None,
         path = prj.raiz(projeto) / pasta / f"{datetime.now():%Y%m%d-%H%M}_job-{ini[1]}.csv"
         jb.gravar_csv(eventos, path)
         eventos = jb.ler_local(str(path))
-        avisos.append(f"linhas dos listeners em {_relativo(path, projeto)}")
+        avisos.append(f"linhas dos listeners em {_relativo(path, projeto)} · relatório em "
+                      f"{_relativo(path.with_suffix('.md'), projeto)}")
     if not thread:
         avisos.append("sem apelido 'thread' na config: partições intercaladas podem não se separar")
     errs = None
@@ -611,7 +613,10 @@ def elk_job(projeto: Projeto = None,
             avisos.append(f"WARN/ERROR: só os primeiros {MAX_JOB_ERROS} de {estado.get('total')}")
     elif erros:
         avisos.append("sem apelido 'nivel' na config: WARN/ERROR não varridos")
-    return jb.relatorio(eventos, errs, alvo.amb, " · ".join(avisos) or None)
+    md = jb.relatorio(eventos, errs, alvo.amb, " · ".join(avisos) or None)
+    if projeto:  # o relatório inteiro fica em arquivo, mesmo que a conversa o resuma
+        path.with_suffix(".md").write_text(md, encoding="utf-8")
+    return md
 
 
 # ---------------------------------------------------------------- tools: consultas salvas

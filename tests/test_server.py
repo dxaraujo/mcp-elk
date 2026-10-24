@@ -497,7 +497,7 @@ def test_job_local_consolida_particoes(tmp_path):
     assert "| ↳ partition1 | COMPLETED | 11 |" in md and "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md  # = manager
     assert "⚠️" not in md.split("## WARN")[0] and md.index("| prepara |") < md.index("| grava |")
     assert "| ERROR | Repo | 2× |" in md and "| grava |" in md.split("WARN / ERROR")[1]
-    assert server.elk_job(log_local=str(log)).startswith("# Execução — carga")  # último job executado
+    assert server.elk_job(log_local=str(log)).startswith(jb.MOSTRAR + "\n# Execução — carga")  # último job
 
 
 def test_job_particoes_embaralhadas_no_mesmo_ms():
@@ -551,6 +551,7 @@ def test_job_elk(fake, projeto):
     assert "(prod)" in md and "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md and "| ERROR | Repo | 2× |" in md
     janela = body(fake.calls[1])["params"]["body"]["query"]["bool"]["filter"][-1]["range"]["ts"]
     assert janela["gte"].endswith("||-5s") and janela["lte"].endswith("||+5s")
+    assert Path(projeto, md.split("relatório em ")[1].split()[0]).read_text("utf-8") == md
     csvs = list(Path(projeto).rglob("*_job-carga.csv"))
     assert len(csvs) == 1 and csvs[0].relative_to(projeto).as_posix() in md  # baixado e citado no relatório
     refeito = server.elk_job(log_local=str(csvs[0]), erros=False)
