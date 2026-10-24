@@ -83,7 +83,12 @@ def ler_local(caminho: str) -> list[dict]:
 
 
 def recortar(eventos: list[dict], job: str | None) -> tuple[list[dict], str | None]:
-    """Da última "Iniciando processamento do JOB" (do `job`, ou de qualquer um) até o fim correspondente."""
+    """Da última "Iniciando processamento do JOB" (do `job`, ou de qualquer um) até o fim correspondente. Vale para ELK e
+    log local: ordena antes pelo tempo com a fração inteira (até ns), que o ES e o arquivo podem não respeitar."""
+    try:
+        eventos = sorted(eventos, key=lambda e: chave_ordem(e["ts"]))
+    except ValueError:  # tempo fora do ISO: fica a ordem recebida
+        pass
     inicio, nome = None, None
     for i, e in enumerate(eventos):
         if (m := INICIO_JOB.search(e["msg"])) and (job is None or m[1] == job):

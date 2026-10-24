@@ -47,7 +47,8 @@ mcp = MCPServer("elk", instructions=(
     "servico, logger e excecao: o que é novo ou cresceu é o suspeito; para achar o início, fatie a janela; evidência: "
     "elk_buscar_logs limite 5, mais_recentes=false; separe fato (contagem) de hipótese.\n"
     "Job Spring Batch (\"logs do job X\", \"último job executado\"): elk_job (sumário por step + WARN/ERROR), do "
-    "ELK ou, se o pedido disser local, do arquivo de log em log_local. A tabela já vem partição a partição: mostre-a "
+    "ELK ou, se o pedido disser local, do arquivo de log em log_local (prefira o .log em JSON ao de texto: mesmo "
+    "formato e mesma lógica do Kibana). A tabela já vem partição a partição: mostre-a "
     "como veio, sem montar outra; dúvida nos números se confere no CSV que ele grava.\n"
     "Configurar: elk_listar_indices → o usuário escolhe; recorte (fixos) pelo nome do sistema (amostra com "
     "elk_buscar_logs limite 1, confirme com elk_contar); apelidos a partir de 1–3 documentos; campo-tempo: no "
@@ -552,7 +553,8 @@ def elk_job(projeto: Projeto = None,
             job: Annotated[str | None, Field(description="nome do job; sem ele, o último executado")] = None,
             inicio: str = "now-7d", fim: str = "now",
             log_local: Annotated[str | None, Field(
-                description="caminho absoluto do log local (JSONL, texto ou CSV do elk_job); sem ele, ELK")] = None,
+                description="caminho absoluto do log local: o JSON (JSONL, mesmo formato do Kibana) "
+                            "quando houver; texto só sem JSON; ou o CSV do elk_job. Sem ele, ELK")] = None,
             erros: Annotated[bool, Field(description="varre WARN/ERROR da janela da execução")] = True,
             indice: Indice = None, ambiente: Ambiente = None) -> str:
     """Última execução de um job Spring Batch: acha início e fim, baixa as linhas dos listeners de job e step
@@ -587,11 +589,6 @@ def elk_job(projeto: Projeto = None,
     eventos = [{"ts": r.get(alvo.tempo, ""), "thread": r.get(thread, "") if thread else "", "logger": r.get(logger, ""),
                 "msg": r.get(msg) or "", "level": ""} for r in _documentos(alvo, q, ret, MAX_JOB, estado)]
     avisos = [f"mais de {MAX_JOB} eventos de listener: sumário parcial"] if estado["truncado"] else []
-    # o ES ordena só até o ms; o valor guardado do campo de tempo (o da aplicação) tem a fração inteira, até ns
-    try:
-        eventos.sort(key=lambda e: jb.chave_ordem(e["ts"]))
-    except ValueError:
-        avisos.append(f"campo de tempo '{alvo.tempo}' sem data ISO em alguma linha: ordem do ES, até o ms")
     eventos, _ = jb.recortar(eventos, ini[1])
     if projeto:  # a tabela sai do arquivo baixado, que fica para conferência (log_local relê)
         pasta = ((alvo.cfg or {}).get("download") or {}).get("path") or ".kiro/local/elk"

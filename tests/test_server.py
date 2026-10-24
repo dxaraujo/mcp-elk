@@ -562,3 +562,10 @@ def test_chave_ordem_fracao_de_tamanho_variavel():
           "2026-10-23T10:31:55Z"]
     assert sorted(ts[::-1], key=jb.chave_ordem) == ts
     assert jb.chave_ordem("9765222") < jb.chave_ordem("9766231")  # log.offset
+
+
+def test_job_local_jsonl_fora_de_ordem_usa_a_mesma_ordenacao(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in _linhas_job()[::-1]), "utf-8")
+    md = server.elk_job(job="carga", log_local=str(log), erros=False)
+    assert "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md and md.index("| prepara |") < md.index("| grava |")
