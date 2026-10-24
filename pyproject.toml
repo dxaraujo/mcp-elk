@@ -1,6 +1,6 @@
 [project]
 name = "mcp-elk"
-version = "3.0.1"
+version = "3.0.2"
 description = "MCP do ELK (Elasticsearch/Kibana): logs pela config do projeto, contagem comparada, exportação CSV, execução de job Spring Batch e consultas salvas"
 readme = "README.md"
 license = "MIT"

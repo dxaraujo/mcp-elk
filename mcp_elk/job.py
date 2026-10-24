@@ -5,6 +5,7 @@ Evento = {ts, thread, logger, msg, level}; `ts` só ordena e recorta (no ELK é 
 """
 from __future__ import annotations
 
+import csv
 import json
 import re
 import unicodedata
@@ -24,6 +25,7 @@ PARTICAO = re.compile(r"^(.+?):partition(\d+)$")
 CONTADORES = {"linhas lidas": "lidas", "skips na leitura": "skip_leitura", "linhas filtradas": "filtradas",
               "linhas gravadas": "gravadas", "skips na gravacao": "skip_gravacao",
               "skips no processamento": "skip_processamento", "commits": "commits", "rollback": "rollback"}
+CSV_COLUNAS = ["ts", "thread", "logger", "level", "msg"]
 # texto do Spring Boot: "2026-10-09T11:43:42.736-03:00  INFO 9266 --- [main] a.b.Classe : mensagem"
 _LINHA_TEXTO = re.compile(r"^(\S+)\s+([A-Z]+)\s+\d+\s+---\s+\[\s*(.*?)\]\s+(\S+)\s*:\s?(.*)$")
 
@@ -32,12 +34,24 @@ def _sem_acento(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower().strip()
 
 
+def gravar_csv(eventos: list[dict], path: Path) -> None:
+    """Eventos em CSV (UTF-8 com BOM), na ordem recebida; `ler_local` lê de volta."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, CSV_COLUNAS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(eventos)
+
+
 def ler_local(caminho: str) -> list[dict]:
-    """Eventos de um log local: JSONL (preferido: message, logger_name, thread_name, level, @timestamp) ou texto do
-    Spring Boot (linhas sem prefixo continuam a mensagem anterior)."""
+    """Eventos de um log local: CSV de `gravar_csv`, JSONL (preferido: message, logger_name, thread_name, level,
+    @timestamp) ou texto do Spring Boot (linhas sem prefixo continuam a mensagem anterior)."""
     path = Path(caminho)
     if not path.is_absolute() or not path.is_file():
         raise ValueError(f"log_local precisa ser o caminho absoluto de um arquivo existente: {caminho}")
+    if path.suffix.lower() == ".csv":
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            return [{k: r.get(k) or "" for k in CSV_COLUNAS} for r in csv.DictReader(f)]
     eventos = []
     with path.open(encoding="utf-8", errors="replace") as f:
         for linha in f:

@@ -551,3 +551,7 @@ def test_job_elk(fake, projeto):
     assert "(prod)" in md and "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md and "| ERROR | Repo | 2× |" in md
     janela = body(fake.calls[1])["params"]["body"]["query"]["bool"]["filter"][-1]["range"]["ts"]
     assert janela["gte"].endswith("||-5s") and janela["lte"].endswith("||+5s")
+    csvs = list(Path(projeto).rglob("*_job-carga.csv"))
+    assert len(csvs) == 1 and csvs[0].relative_to(projeto).as_posix() in md  # baixado e citado no relatório
+    refeito = server.elk_job(log_local=str(csvs[0]), erros=False)
+    assert refeito.split("## Steps")[1] == md.split("## Steps")[1].split("## WARN")[0].rstrip("\n")

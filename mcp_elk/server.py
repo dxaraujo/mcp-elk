@@ -47,7 +47,8 @@ mcp = MCPServer("elk", instructions=(
     "servico, logger e excecao: o que é novo ou cresceu é o suspeito; para achar o início, fatie a janela; evidência: "
     "elk_buscar_logs limite 5, mais_recentes=false; separe fato (contagem) de hipótese.\n"
     "Job Spring Batch (\"logs do job X\", \"último job executado\"): elk_job (sumário por step + WARN/ERROR), do "
-    "ELK ou, se o pedido disser local, do arquivo de log em log_local.\n"
+    "ELK ou, se o pedido disser local, do arquivo de log em log_local. A tabela já vem partição a partição: mostre-a "
+    "como veio, sem montar outra; dúvida nos números se confere no CSV que ele grava.\n"
     "Configurar: elk_listar_indices → o usuário escolhe; recorte (fixos) pelo nome do sistema (amostra com "
     "elk_buscar_logs limite 1, confirme com elk_contar); apelidos a partir de 1–3 documentos; valores com "
     "elk_contar(agrupar_por); mostre o JSON, confirme e grave com elk_configurar.\n"
@@ -549,12 +550,14 @@ def elk_job(projeto: Projeto = None,
             job: Annotated[str | None, Field(description="nome do job; sem ele, o último executado")] = None,
             inicio: str = "now-7d", fim: str = "now",
             log_local: Annotated[str | None, Field(
-                description="caminho absoluto do log local (JSONL ou texto); sem ele, ELK")] = None,
+                description="caminho absoluto do log local (JSONL, texto ou CSV do elk_job); sem ele, ELK")] = None,
             erros: Annotated[bool, Field(description="varre WARN/ERROR da janela da execução")] = True,
             indice: Indice = None, ambiente: Ambiente = None) -> str:
-    """Última execução de um job Spring Batch (listeners "...LoggerListener"): sumário por step em ordem, partições
-    consolidadas, e WARN/ERROR agrupados. No ELK usa os apelidos mensagem, logger, thread e nivel da config.
-    → Markdown pronto para mostrar"""
+    """Última execução de um job Spring Batch: acha início e fim, baixa as linhas dos listeners de job e step
+    ("...LoggerListener") em CSV no download.path da config (padrão .kiro/local/elk) e monta dele a tabela por step,
+    uma linha por partição e a soma, mais WARN/ERROR agrupados. No ELK usa os apelidos mensagem, logger, thread e
+    nivel da config; `log_local` aceita esse CSV para refazer o sumário.
+    → Markdown pronto: mostre a tabela como veio, sem refazer nem resumir"""
     if log_local:
         eventos, nome = jb.recortar(jb.ler_local(log_local), job)
         errs = [e for e in eventos if e["level"].upper() in ("WARN", "WARNING", "ERROR")] if erros else None
@@ -583,6 +586,12 @@ def elk_job(projeto: Projeto = None,
                 "msg": r.get(msg) or "", "level": ""} for r in _documentos(alvo, q, ret, MAX_JOB, estado)]
     eventos, _ = jb.recortar(eventos, ini[1])
     avisos = [f"mais de {MAX_JOB} eventos de listener: sumário parcial"] if estado["truncado"] else []
+    if projeto:  # a tabela sai do arquivo baixado, que fica para conferência (log_local relê)
+        pasta = ((alvo.cfg or {}).get("download") or {}).get("path") or ".kiro/local/elk"
+        path = prj.raiz(projeto) / pasta / f"{datetime.now():%Y%m%d-%H%M}_job-{ini[1]}.csv"
+        jb.gravar_csv(eventos, path)
+        eventos = jb.ler_local(str(path))
+        avisos.append(f"linhas dos listeners em {_relativo(path, projeto)}")
     if not thread:
         avisos.append("sem apelido 'thread' na config: partições intercaladas podem não se separar")
     errs = None
