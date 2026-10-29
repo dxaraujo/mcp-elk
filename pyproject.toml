@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/dxaraujo/kiro/tree/main/mcps/elk"
+Repository = "https://github.com/dxaraujo/mcp-elk"
 
 [project.scripts]
 mcp-elk = "mcp_elk.server:main"
