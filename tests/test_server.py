@@ -570,3 +570,10 @@ def test_job_local_jsonl_fora_de_ordem_usa_a_mesma_ordenacao(tmp_path):
     log.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in _linhas_job()[::-1]), "utf-8")
     md = server.elk_job(job="carga", log_local=str(log), erros=False)
     assert "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md and md.index("| prepara |") < md.index("| grava |")
+
+
+def test_schema_igual_ao_publicado():
+    publicado = Path(__file__).resolve().parents[2] / "mcps/elk/elk.schema.json"
+    if not publicado.exists():
+        pytest.skip("repositório mcps não clonado ao lado")
+    assert (Path(server.__file__).with_name("elk.schema.json")).read_bytes() == publicado.read_bytes()

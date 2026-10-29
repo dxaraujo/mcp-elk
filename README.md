@@ -70,7 +70,7 @@ Sem segredos:
 
 ```json
 {
-  "$schema": "https://dxaraujo.github.io/mcp-elk/elk.schema.json",
+  "$schema": "https://dxaraujo.github.io/mcps/elk/elk.schema.json",
   "indice-padrao": "aplicacao",
   "indices": {
     "aplicacao": {
