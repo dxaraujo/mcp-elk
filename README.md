@@ -2,7 +2,7 @@
 
 Servidor MCP para os logs do ELK (Elasticsearch + Kibana). Lê os logs; a única escrita é criar e atualizar busca
 salva no Kibana. Desde a 3.0 é **autossuficiente**, sem power: o servidor lê a configuração do projeto
-(`.kiro/config/elk/elk-<ambiente>.json`) e aplica sozinho índice, campo de tempo, recorte do sistema e apelidos de
+(`.sabia/config/elk/elk-<ambiente>.json`) e aplica sozinho índice, campo de tempo, recorte do sistema e apelidos de
 campo; as regras de uso (volume, diagnóstico, jobs, setup) vão nas `instructions` do MCP, e o sumário de execução de
 job Spring Batch é montado em Python, não pela LLM.
 
@@ -64,8 +64,10 @@ alguns Kibana só oferecem `AES256-SHA256`, que a lista do Python exclui.
 
 ## Configuração do projeto
 
-`<projeto>/.kiro/config/elk/elk-<ambiente>.json` (`elk-prod.json`, `elk-homol.json`, `elk-dev.json`), validado pelo
+`<projeto>/.sabia/config/elk/elk-<ambiente>.json` (`elk-prod.json`, `elk-homol.json`, `elk-dev.json`), validado pelo
 [elk.schema.json](mcp_elk/elk.schema.json) e gravado pela tool `elk_configurar` (peça ao agente "configurar o ELK").
+Na leitura, o MCP procura nesta ordem: `.sabia/config/elk/`, `.kiro/config/elk/`, `.kiro/config/sdd/`; se o arquivo
+existir em mais de uma, vale a primeira. A gravação vai sempre para `.sabia/config/elk/`.
 Sem segredos:
 
 ```json

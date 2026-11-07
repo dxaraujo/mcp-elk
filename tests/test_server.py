@@ -8,6 +8,7 @@ from requests.adapters import BaseAdapter
 
 from mcp_elk import config, server
 from mcp_elk import job as jb
+from mcp_elk import projeto as prj
 from mcp_elk.config import ElkConfig
 from mcp_elk.contrato import Erro
 
@@ -398,9 +399,31 @@ def test_configurar_valida_e_grava(tmp_path):
     with pytest.raises(Erro, match="indice-padrao"):
         server.elk_configurar(str(tmp_path), {**CONFIG, "indice-padrao": "outro"})
     out = server.elk_configurar(str(tmp_path), CONFIG, ambiente="hml")
-    assert out == {"arquivo": ".kiro/config/elk/elk-homol.json"}
+    assert out == {"arquivo": ".sabia/config/elk/elk-homol.json"}
     gravado = json.loads((tmp_path / out["arquivo"]).read_text("utf-8"))
     assert list(gravado)[0] == "$schema" and gravado["indices"] == CONFIG["indices"]
+
+
+def _antigo(tmp_path, pasta, padrao):
+    arq = tmp_path / pasta / "elk-prod.json"
+    arq.parent.mkdir(parents=True)
+    arq.write_text(json.dumps({**CONFIG, "indices": {"app": {**CONFIG["indices"]["app"], "padrao": padrao}}}), "utf-8")
+
+
+@pytest.mark.parametrize("pasta", [".sabia/config/elk", ".kiro/config/elk", ".kiro/config/sdd"])
+def test_config_le_de_cada_pasta(tmp_path, pasta):
+    _antigo(tmp_path, pasta, "so-aqui-*")
+    assert prj.carregar(str(tmp_path), "prod")["indices"]["app"]["padrao"] == "so-aqui-*"
+    assert prj.arquivo(str(tmp_path), "prod") == tmp_path / pasta / "elk-prod.json"
+
+
+def test_config_vale_a_primeira_pasta_e_grava_na_nova(tmp_path):
+    _antigo(tmp_path, ".kiro/config/sdd", "sdd-*")
+    _antigo(tmp_path, ".kiro/config/elk", "kiro-*")
+    assert prj.carregar(str(tmp_path), "prod")["indices"]["app"]["padrao"] == "kiro-*"
+    assert server.elk_configurar(str(tmp_path), CONFIG, ambiente="prod") == {"arquivo": ".sabia/config/elk/elk-prod.json"}
+    assert prj.carregar(str(tmp_path), "prod")["indices"]["app"]["padrao"] == "logs-*"
+    assert (tmp_path / ".kiro/config/elk/elk-prod.json").is_file()  # o antigo fica intacto
 
 
 def test_config_aplica_fixos_apelidos_e_parametros(fake, projeto):
@@ -428,8 +451,9 @@ def test_config_aplica_fixos_apelidos_e_parametros(fake, projeto):
 
 
 def test_sem_config_exige_indice(fake, tmp_path):
-    with pytest.raises(Erro, match="elk_configurar"):
+    with pytest.raises(Erro, match="elk_configurar") as exc:
         server.elk_contar("now-1h", projeto=str(tmp_path), consulta="x")
+    assert ".sabia/config/elk, .kiro/config/elk, .kiro/config/sdd" in str(exc.value)
 
 
 def test_exportar_por_assunto(fake, projeto, monkeypatch):

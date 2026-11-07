@@ -1,7 +1,7 @@
 """Servidor MCP do ELK (Elasticsearch + Kibana): lê logs; a configuração do projeto vem do elk-<ambiente>.json.
 
 Índice, campo de tempo, recorte fixo, apelidos de campos e consultas salvas ficam em
-<projeto>/.kiro/config/elk/elk-<ambiente>.json; o elk.properties só tem credenciais e servidores.
+<projeto>/.sabia/config/elk/elk-<ambiente>.json; o elk.properties só tem credenciais e servidores.
 
 Transporte: Elasticsearch direto quando `es_<ambiente>` está configurado (APIs REST oficiais); senão o Kibana
 via POST /internal/search/es (API interna do Kibana, mesmo corpo Query DSL; é o primeiro lugar a revalidar num upgrade).
@@ -31,7 +31,7 @@ from .contrato import ElkHttpError, Erro, erro, operacao
 mcp = MCPServer("elk", instructions=(
     "Logs do ELK (Elasticsearch/Kibana), só leitura; a única escrita é busca salva no Kibana, após o usuário "
     "confirmar. Passe `projeto` (caminho absoluto do workspace) em toda tool: o MCP lê "
-    ".kiro/config/elk/elk-<ambiente>.json e aplica sozinho índice, campo de tempo, `fixos` (recorte do sistema) e "
+    ".sabia/config/elk/elk-<ambiente>.json e aplica sozinho índice, campo de tempo, `fixos` (recorte do sistema) e "
     "apelidos de campo (nivel, mensagem, servico...: valem em campos, consulta, retornar e agrupar_por); consulta "
     "salva vai em `salva` pelo título. Sem esse arquivo, pergunte uma vez: configurar (elk_configurar) ou seguir "
     "passando `indice` real de elk_listar_indices. Nunca invente índice, campo ou valor: venha de uma tool.\n"
@@ -268,7 +268,8 @@ def _alvo(projeto: str | None, ambiente: str | None, indice: str | None, campo_t
                      avisos=[f"índice '{nome}' fora da config: sem fixos nem apelidos"])
     if not indice:
         onde = "no projeto" if projeto else "(informe projeto)"
-        raise Erro("config", f"sem .kiro/config/elk/elk-{amb}.json {onde}: informe `indice` (padrao de "
+        raise Erro("config", f"sem elk-{amb}.json {onde} (procurado em {prj.PROCURA}; grava em "
+                             f"{prj.PASTA.as_posix()}): informe `indice` (padrao de "
                              "elk_listar_indices) ou configure com elk_configurar", "indice")
     return _Alvo(amb, indice, campo_tempo or "@timestamp")
 
@@ -908,7 +909,7 @@ def elk_configurar(projeto: Annotated[str, Field(description="caminho absoluto d
                        "campos?{apelido: campo}, valores?{apelido: [..]}}}, consultas?{titulo: {id, espaco?}}, "
                        "download?{path relativo}}"))],
                    ambiente: Ambiente = None) -> dict:
-    """Valida e grava a config do ambiente (.kiro/config/elk/elk-<ambiente>.json), substituindo o arquivo: envie o
+    """Valida e grava a config do ambiente (sempre em .sabia/config/elk/elk-<ambiente>.json), substituindo o arquivo: envie o
     JSON completo, já mostrado e confirmado pelo usuário; todo campo e valor veio de uma tool. campo-tempo: o
     timestamp gravado pela aplicação (fração até ns) quando o documento tiver, não o @timestamp da ingestão (só ms).
     → dados: {arquivo}"""

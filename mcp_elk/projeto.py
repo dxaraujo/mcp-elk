@@ -1,4 +1,7 @@
-"""Arquivo do projeto: <projeto>/.kiro/config/elk/elk-<ambiente>.json, um por ambiente, validado pelo elk.schema.json.
+"""Arquivo do projeto: <projeto>/.sabia/config/elk/elk-<ambiente>.json, um por ambiente, validado pelo elk.schema.json.
+
+Leitura procura em .sabia/config/elk, depois .kiro/config/elk e .kiro/config/sdd (projetos anteriores); vale a
+primeira pasta que tiver o arquivo. Gravação sempre em .sabia/config/elk.
 
 O caminho do projeto vem em cada chamada: o cliente não inicia o MCP no workspace.
 """
@@ -13,7 +16,9 @@ import jsonschema
 
 from .contrato import Erro
 
-PASTA = Path(".kiro") / "config" / "elk"
+PASTA = Path(".sabia") / "config" / "elk"
+PASTAS = (PASTA, Path(".kiro") / "config" / "elk", Path(".kiro") / "config" / "sdd")  # ordem de procura
+PROCURA = ", ".join(p.as_posix() for p in PASTAS)
 SCHEMA_URL = "https://dxaraujo.github.io/mcps/elk/elk.schema.json"
 _VALIDADOR = jsonschema.Draft202012Validator(json.loads(Path(__file__).with_name("elk.schema.json").read_text("utf-8")))
 _cache: dict[Path, tuple[int, dict]] = {}
@@ -28,7 +33,9 @@ def raiz(projeto: str) -> Path:
 
 
 def arquivo(projeto: str, amb: str) -> Path:
-    return raiz(projeto) / PASTA / f"elk-{amb}.json"
+    """Primeiro elk-<amb>.json existente na ordem de PASTAS; sem nenhum, o caminho novo (.sabia/config/elk)."""
+    base, nome = raiz(projeto), f"elk-{amb}.json"
+    return next((base / p / nome for p in PASTAS if (base / p / nome).is_file()), base / PASTA / nome)
 
 
 def faltando(dados) -> list[str]:
@@ -68,7 +75,7 @@ def gravar(projeto: str, amb: str, dados: dict) -> Path:
     dados = {"$schema": SCHEMA_URL, **{k: v for k, v in dados.items() if k != "$schema"}}
     if erros := faltando(dados):
         raise Erro("entrada", f"config inválida: {', '.join(erros)}", erros[0])
-    arq = arquivo(projeto, amb)
+    arq = raiz(projeto) / PASTA / f"elk-{amb}.json"
     arq.parent.mkdir(parents=True, exist_ok=True)
     arq.write_text(json.dumps(dados, indent=2, ensure_ascii=False) + "\n", "utf-8")
     return arq
