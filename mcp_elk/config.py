@@ -1,18 +1,12 @@
-"""Carrega credenciais e servidores do ELK a partir de elk.properties."""
+"""Carrega credenciais, servidores e certificado do ELK das variáveis de ambiente."""
 from __future__ import annotations
 
-import configparser
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REQUIRED = ("user", "password", "prod")
+REQUIRED = ("ELK_USER", "ELK_PASSWORD", "ELK_URL_PROD")
 AMBIENTES = ("prod", "homol", "dev")
-TEMPLATE = (
-    "[DEFAULT]\nuser = SEU_USUARIO\npassword = SUA_SENHA\n"
-    "prod = https://logs.SEU-SERVIDOR\nhomol = https://hlogs.SEU-SERVIDOR\ndev = https://dlogs.SEU-SERVIDOR"
-)
 
 
 @dataclass(frozen=True)
@@ -20,33 +14,28 @@ class ElkConfig:
     user: str
     password: str = field(repr=False)
     kibana: dict = field(default_factory=dict)  # {ambiente: url do Kibana}
-    es: dict = field(default_factory=dict)  # {ambiente: url do Elasticsearch}, opcional (es_<ambiente>)
+    es: dict = field(default_factory=dict)  # {ambiente: url do Elasticsearch}, opcional (ES_URL_<AMBIENTE>)
 
 
-def default_path() -> Path:
-    if env := os.environ.get("MCP_ELK_CONFIG"):
-        return Path(env)
-    if sys.platform == "win32":
-        return Path(os.environ["APPDATA"]) / "mcp-elk" / "elk.properties"
-    return Path.home() / ".config" / "mcp-elk" / "elk.properties"
-
-
-def load_config(path: Path | None = None) -> ElkConfig:
-    path = path or default_path()
+def ca_bundle() -> Path | None:
+    """Cadeia PEM extra apontada por ELK_CA_BUNDLE, somada às CAs da máquina."""
+    valor = os.environ.get("ELK_CA_BUNDLE", "").strip()
+    if not valor:
+        return None
+    path = Path(valor).expanduser()
     if not path.is_file():
-        raise FileNotFoundError(f"Arquivo de credenciais não encontrado: {path}\nCrie-o com:\n{TEMPLATE}")
-    # interpolation=None: senhas podem conter '%'
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        parser.read(path, encoding="utf-8")
-    except configparser.Error as exc:  # ex.: chave repetida
-        raise ValueError(f"{path} inválido: {exc}") from exc
-    section = parser.defaults()
-    missing = [k for k in REQUIRED if not section.get(k, "").strip()]
+        raise ValueError(f"ELK_CA_BUNDLE aponta para um arquivo que não existe: {path}")
+    return path
+
+
+def load_config() -> ElkConfig:
+    missing = [k for k in REQUIRED if not os.environ.get(k, "").strip()]
     if missing:
-        raise ValueError(f"Chave(s) ausente(s) em {path} [DEFAULT]: {', '.join(missing)}")
+        raise ValueError(f"Variável(is) de ambiente ausente(s): {', '.join(missing)}")
+    ca_bundle()  # arquivo errado aparece já na carga
 
     def urls(prefix: str) -> dict:
-        return {a: v.strip().rstrip("/") for a in AMBIENTES if (v := section.get(prefix + a, "")).strip()}
+        return {a: v.strip().rstrip("/") for a in AMBIENTES if (v := os.environ.get(prefix + a.upper(), "")).strip()}
 
-    return ElkConfig(user=section["user"].strip(), password=section["password"], kibana=urls(""), es=urls("es_"))
+    return ElkConfig(user=os.environ["ELK_USER"].strip(), password=os.environ["ELK_PASSWORD"],
+                     kibana=urls("ELK_URL_"), es=urls("ES_URL_"))

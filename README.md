@@ -18,11 +18,22 @@ No Kiro, em `~/.kiro/settings/mcp.json` (todos os projetos) ou `.kiro/settings/m
       "type": "stdio",
       "command": "uvx",
       "args": ["mcp-elk@latest"],
-      "env": { "UV_SYSTEM_CERTS": "true" }
+      "env": {
+        "ELK_USER": "${ELK_USER}",
+        "ELK_PASSWORD": "${ELK_PASSWORD}",
+        "ELK_URL_PROD": "https://logs.SEU-SERVIDOR",
+        "UV_SYSTEM_CERTS": "true"
+      }
     }
   }
 }
 ```
+
+**Como passar as variáveis:** defina-as no bloco `env` do servidor MCP, como no exemplo. Para não gravar segredos em
+texto puro, use referências: `${VAR}` no Kiro IDE, `${env:VAR}` no Kiro CLI e `{env:VAR}` no opencode, e deixe o valor
+no gerenciador de segredos ou no ambiente de onde a ferramenta é aberta. Não há arquivo de configuração nem caminho padrão.
+No macOS, um app aberto pelo Dock não herda o `export` do shell: abra a ferramenta pelo terminal ou defina a variável no
+ambiente da sessão. Evite `export` no perfil do shell quando o agente puder rodar comandos, porque ele conseguiria ler o valor.
 
 `UV_SYSTEM_CERTS` faz o `uvx` usar as CAs da máquina para baixar o pacote (proxy corporativo).
 
@@ -34,32 +45,22 @@ uv run pytest
 uv run mcp dev mcp_elk/server.py   # MCP Inspector
 ```
 
-## Credenciais e servidores
+## Configuração
 
-| SO | Arquivo |
-|---|---|
-| Linux/Mac | `~/.config/mcp-elk/elk.properties` |
-| Windows | `%APPDATA%\mcp-elk\elk.properties` |
+Só por variáveis de ambiente, no `env` do servidor MCP:
 
-Para usar outro caminho, defina a variável de ambiente `MCP_ELK_CONFIG`.
+| Variável | Obrigatória | O que é |
+|---|---|---|
+| `ELK_USER`, `ELK_PASSWORD` | sim | Usuário e senha |
+| `ELK_URL_PROD` | sim | URL do **Kibana** em produção |
+| `ELK_URL_HOMOL`, `ELK_URL_DEV` | não | URL do **Kibana** nos outros ambientes |
+| `ES_URL_PROD`, `ES_URL_HOMOL`, `ES_URL_DEV` | não | URL do **Elasticsearch** direto |
+| `ELK_CA_BUNDLE` | não | Caminho de um arquivo PEM com a cadeia do Kibana, somada às CAs da máquina |
 
-```ini
-[DEFAULT]
-user = SEU_USUARIO
-password = SUA_SENHA
-prod = https://logs.SEU-SERVIDOR
-homol = https://hlogs.SEU-SERVIDOR
-dev = https://dlogs.SEU-SERVIDOR
-```
+Com `ES_URL_<AMBIENTE>`, o MCP usa as APIs REST oficiais (`_search`, `_field_caps`, PIT). Sem elas, a busca passa pelo
+Kibana em `POST /internal/search/es`, uma API **interna** do Kibana e o primeiro ponto a revalidar num upgrade.
 
-`prod`, `homol` e `dev` são as URLs do **Kibana**; só `prod` é obrigatória. Opcionalmente, `es_prod`, `es_homol` e
-`es_dev` são as URLs do **Elasticsearch** direto: quando presentes, o MCP usa as APIs REST oficiais (`_search`,
-`_field_caps`, PIT). Sem elas, a busca passa pelo Kibana em `POST /internal/search/es`, uma API **interna** do Kibana e
-o primeiro ponto a revalidar num upgrade.
-
-**Certificados:** o MCP confia nas CAs instaladas na máquina (no Windows, as do repositório do Windows) e, se existir,
-em `elk-bundle.pem`, na mesma pasta do `elk.properties`: a cadeia PEM do Kibana, quando a CA
-não estiver instalada. `REQUESTS_CA_BUNDLE` também funciona. A sessão aceita as cifras padrão do OpenSSL, porque
+A sessão aceita as cifras padrão do OpenSSL, porque
 alguns Kibana só oferecem `AES256-SHA256`, que a lista do Python exclui.
 
 ## Configuração do projeto

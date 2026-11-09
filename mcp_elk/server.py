@@ -1,7 +1,7 @@
 """Servidor MCP do ELK (Elasticsearch + Kibana): lê logs; a configuração do projeto vem do elk-<ambiente>.json.
 
 Índice, campo de tempo, recorte fixo, apelidos de campos e consultas salvas ficam em
-<projeto>/.sabia/config/elk/elk-<ambiente>.json; o elk.properties só tem credenciais e servidores.
+<projeto>/.sabia/config/elk/elk-<ambiente>.json; credenciais e servidores vêm das variáveis de ambiente.
 
 Transporte: Elasticsearch direto quando `es_<ambiente>` está configurado (APIs REST oficiais); senão o Kibana
 via POST /internal/search/es (API interna do Kibana, mesmo corpo Query DSL; é o primeiro lugar a revalidar num upgrade).
@@ -25,7 +25,7 @@ from pydantic import Field
 from requests.adapters import HTTPAdapter
 
 from . import job as jb, projeto as prj
-from .config import ElkConfig, default_path, load_config
+from .config import ElkConfig, ca_bundle, load_config
 from .contrato import ElkHttpError, Erro, erro, operacao
 
 mcp = MCPServer("elk", instructions=(
@@ -55,7 +55,7 @@ mcp = MCPServer("elk", instructions=(
     "documento de amostra, o timestamp gravado pela aplicação (fração até ns, ex.: app.@timestamp) quando houver, "
     "não o da ingestão (@timestamp do data view, só ms): é ele que ordena as linhas do elk_job; valores com "
     "elk_contar(agrupar_por); mostre o JSON, confirme e grave com elk_configurar.\n"
-    "Logs têm dados pessoais: mostre só o necessário. Nunca leia ~/.config/mcp-elk/elk.properties (tem a senha).\n"
+    "Logs têm dados pessoais: mostre só o necessário. Nunca mostre o valor de ELK_PASSWORD.\n"
     "Resposta: {\"ok\":true,\"dados\":...} ou {\"ok\":false,\"erro\":{\"codigo\",\"detalhe\",\"campo\"}}; siga o "
     "detalhe do erro, sem tentativas às cegas. elk_job devolve Markdown."))
 
@@ -108,20 +108,15 @@ def tool(fn):
 
 # ---------------------------------------------------------------- HTTP
 
-def ca_bundle() -> Path:
-    """CAs extras (ex.: cadeia interna do Kibana), ao lado do elk.properties."""
-    return default_path().parent / "elk-bundle.pem"
-
-
 class _TlsAdapter(HTTPAdapter):
-    """CAs do sistema (no Windows, o repositório do Windows) + elk-bundle.pem, se existir.
+    """CAs do sistema (no Windows, o repositório do Windows) + a cadeia de ELK_CA_BUNDLE, se definida.
     Cifras padrão do OpenSSL: a lista do Python/urllib3 exclui AES256-SHA256 (RSA estático), única oferecida por
     alguns Kibana internos (handshake failure)."""
 
     def init_poolmanager(self, *args, **kwargs):
         ctx = ssl.create_default_context()
-        if ca_bundle().is_file():
-            ctx.load_verify_locations(ca_bundle())
+        if ca := ca_bundle():
+            ctx.load_verify_locations(ca)
         ctx.set_ciphers("DEFAULT")
         super().init_poolmanager(*args, ssl_context=ctx, **kwargs)
 
@@ -139,8 +134,8 @@ class ElkSession:
             resp = self.session.request(method, url, timeout=TIMEOUT, **kwargs)
         except requests.exceptions.SSLError as exc:
             raise Erro("certificado",
-                       f"Certificado do servidor não confiável em {url}. Instale a CA na máquina ou grave a cadeia de "
-                       f"certificados (PEM) em {ca_bundle()} (ou aponte REQUESTS_CA_BUNDLE para ela) e reinicie o MCP. "
+                       f"Certificado do servidor não confiável em {url}. Instale a CA na máquina ou aponte ELK_CA_BUNDLE "
+                       f"para a cadeia de certificados (PEM) e reinicie o MCP. "
                        f"Detalhe: {exc}") from exc
         if not resp.ok:
             raise ElkHttpError(resp)
@@ -155,7 +150,7 @@ _lock = threading.Lock()
 
 
 def get_session() -> ElkSession:
-    """Sessão única por processo; carrega o elk.properties na primeira chamada."""
+    """Sessão única por processo; carrega as variáveis de ambiente na primeira chamada."""
     global _instance
     with _lock:
         if _instance is None:
@@ -185,7 +180,7 @@ def _ambiente(ambiente: str | None) -> str:
 def _kibana(amb: str) -> str:
     url = get_session().cfg.kibana.get(amb)
     if not url:
-        raise Erro("credencial", f"Ambiente '{amb}' sem URL no elk.properties: adicione '{amb} = https://...'.",
+        raise Erro("credencial", f"Ambiente '{amb}' sem URL: defina ELK_URL_{amb.upper()}.",
                    "ambiente")
     return url
 
@@ -403,7 +398,7 @@ def _documentos(alvo: _Alvo, query: dict, retornar: list | None, max_linhas: int
             body["size"] = PAGINA + len(vistos)
             if body["size"] > MAX_RESULT_WINDOW:
                 raise Erro("entrada", f"Documentos demais com o mesmo {alvo.tempo} ({borda}): reduza a janela ou "
-                                      "configure es_<ambiente> no elk.properties (ES direto, com PIT).")
+                                      "configure ES_URL_<AMBIENTE> (ES direto, com PIT).")
     finally:
         if pit and es:
             try:

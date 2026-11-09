@@ -62,25 +62,31 @@ def fake_es(fake):
 
 # ---------------------------------------------------------------- config
 
-def write(tmp_path: Path, text: str) -> Path:
-    p = tmp_path / "elk.properties"
-    p.write_text(text, encoding="utf-8")
-    return p
+@pytest.fixture
+def env(monkeypatch):
+    for k in ("ELK_USER", "ELK_PASSWORD", "ELK_CA_BUNDLE", *(p + a for p in ("ELK_URL_", "ES_URL_") for a in ("PROD", "HOMOL", "DEV"))):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("ELK_USER", "u")
+    monkeypatch.setenv("ELK_PASSWORD", "p%s#s")
+    return monkeypatch
 
 
-def test_load_config(tmp_path):
-    cfg = config.load_config(write(tmp_path, "[DEFAULT]\nuser = u\npassword = p%s#s\nprod = https://k/\n"
-                                             "es_prod = https://e:9200\n"))
+def test_load_config(env):
+    env.setenv("ELK_URL_PROD", "https://k/")
+    env.setenv("ES_URL_PROD", "https://e:9200")
+    cfg = config.load_config()
     assert (cfg.user, cfg.password, cfg.kibana, cfg.es) == ("u", "p%s#s", {"prod": "https://k"},
                                                             {"prod": "https://e:9200"})
     assert "p%s#s" not in repr(cfg)
 
 
-def test_load_config_errors(tmp_path):
-    with pytest.raises(ValueError, match="prod"):
-        config.load_config(write(tmp_path, "[DEFAULT]\nuser = u\npassword = p\n"))
-    with pytest.raises(FileNotFoundError):
-        config.load_config(tmp_path / "nao-existe")
+def test_load_config_errors(env, tmp_path):
+    with pytest.raises(ValueError, match="ELK_URL_PROD"):
+        config.load_config()
+    env.setenv("ELK_URL_PROD", "https://k")
+    env.setenv("ELK_CA_BUNDLE", str(tmp_path / "x.pem"))
+    with pytest.raises(ValueError, match="ELK_CA_BUNDLE"):
+        config.load_config()
 
 
 # ---------------------------------------------------------------- ambiente e consulta
@@ -152,7 +158,7 @@ def test_erro_de_certificado(fake, monkeypatch):
         raise requests.exceptions.SSLError("CERTIFICATE_VERIFY_FAILED")
 
     fake.routes[("POST", f"{KIBANA}/internal/search/es")] = ssl_error
-    with pytest.raises(Erro, match="elk-bundle.pem"):
+    with pytest.raises(Erro, match="ELK_CA_BUNDLE"):
         server.elk_contar("now-1h", indice="logs-*", consulta="x")
 
 

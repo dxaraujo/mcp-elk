@@ -38,7 +38,7 @@ def erro(exc: Exception) -> Erro | None:
     if isinstance(exc, requests.Timeout):
         return Erro("indisponivel", f"servidor sem resposta no prazo (reduza a janela pela metade): {exc}"[:300])
     if isinstance(exc, requests.ConnectionError):
-        return Erro("indisponivel", f"servidor inacessível (rede, VPN ou URL do elk.properties): {exc}"[:300])
+        return Erro("indisponivel", f"servidor inacessível (rede, VPN ou URL em ELK_URL_*): {exc}"[:300])
     if isinstance(exc, FileNotFoundError):
         return Erro("config", str(exc))
     if isinstance(exc, LookupError):
