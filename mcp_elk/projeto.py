@@ -19,7 +19,7 @@ from .contrato import Erro
 PASTA = Path(".sabia") / "config" / "elk"
 PASTAS = (PASTA, Path(".kiro") / "config" / "elk", Path(".kiro") / "config" / "sdd")  # ordem de procura
 PROCURA = ", ".join(p.as_posix() for p in PASTAS)
-SCHEMA_URL = "https://dxaraujo.github.io/mcps/elk/elk.schema.json"
+SCHEMA_URL = "https://dxaraujo.github.io/json-schemas/mcp/elk/elk.schema.json"
 _VALIDADOR = jsonschema.Draft202012Validator(json.loads(Path(__file__).with_name("elk.schema.json").read_text("utf-8")))
 _cache: dict[Path, tuple[int, dict]] = {}
 

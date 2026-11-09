@@ -624,7 +624,7 @@ def test_job_local_jsonl_fora_de_ordem_usa_a_mesma_ordenacao(tmp_path):
 
 
 def test_schema_igual_ao_publicado():
-    publicado = Path(__file__).resolve().parents[2] / "mcps/elk/elk.schema.json"
+    publicado = Path(__file__).resolve().parents[2] / "json-schemas/mcp/elk/elk.schema.json"
     if not publicado.exists():
-        pytest.skip("repositório mcps não clonado ao lado")
+        pytest.skip("repositório json-schemas não clonado ao lado")
     assert (Path(server.__file__).with_name("elk.schema.json")).read_bytes() == publicado.read_bytes()

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dxaraujo.github.io/mcps/elk/elk.schema.json",
+  "$id": "https://dxaraujo.github.io/json-schemas/mcp/elk/elk.schema.json",
   "title": "ELK Project Configuration",
   "description": "Arquivo .sabia/config/elk/elk-<ambiente>.json (elk-prod.json, elk-homol.json, elk-dev.json), lido pelo mcp-elk (procura também em .kiro/config/elk e .kiro/config/sdd, nessa ordem; vale a primeira) e gravado pela tool elk_configurar. Um por ambiente. Sem segredos: credenciais ficam nas variáveis de ambiente do MCP.",
   "type": "object",
