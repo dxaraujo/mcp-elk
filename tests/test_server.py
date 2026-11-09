@@ -368,9 +368,30 @@ def test_tools_list_enxuto_sem_output_schema():
     import asyncio
     tools = asyncio.run(server.mcp.list_tools())
     assert len(tools) == 12
-    assert sum(len(t.description or "") + len(json.dumps(t.input_schema)) for t in tools) <= 11_500  # medido: 10_760
+    assert sum(len(t.description or "") + len(json.dumps(t.input_schema)) for t in tools) <= 13_000  # medido: 12_572 (regras essenciais nas descrições, o canal que sempre chega ao modelo)
     for t in tools:
         assert t.output_schema is None and "→" in t.description, t.name
+        if "projeto" in t.input_schema["properties"]:
+            assert "projeto" in t.input_schema["required"], t.name
+
+
+def test_regras_essenciais_nas_descricoes():
+    import asyncio
+    d = {t.name: t.description for t in asyncio.run(server.mcp.list_tools())}
+    assert "Comece por aqui" in d["elk_status"] and "elk_contar" in d["elk_buscar_logs"]
+    assert "nunca leia o CSV inteiro" in d["elk_exportar_csv"]
+
+
+def test_avisa_sem_projeto():
+    def dados(projeto=None):
+        return {"a": 1}
+
+    def markdown(projeto=None):
+        return "md"
+
+    com = server._avisa_sem_projeto(dados)
+    assert com()["aviso"] == server.SEM_PROJETO and "aviso" not in com(projeto="/x")
+    assert server.SEM_PROJETO in server._avisa_sem_projeto(markdown)()
 
 
 def test_envelope():

@@ -9,6 +9,8 @@ via POST /internal/search/es (API interna do Kibana, mesmo corpo Query DSL; é o
 from __future__ import annotations
 
 import csv
+import functools
+import inspect
 import json
 import re
 import ssl
@@ -30,7 +32,8 @@ from .contrato import ElkHttpError, Erro, erro, operacao
 
 mcp = MCPServer("elk", instructions=(
     "Logs do ELK (Elasticsearch/Kibana), só leitura; a única escrita é busca salva no Kibana, após o usuário "
-    "confirmar. Passe `projeto` (caminho absoluto do workspace) em toda tool: o MCP lê "
+    "confirmar. Comece por elk_status: ele mostra índices, apelidos e consultas já mapeados; use esses nomes. "
+    "Passe `projeto` (caminho absoluto do workspace) em toda tool: o MCP lê "
     ".sabia/config/elk/elk-<ambiente>.json e aplica sozinho índice, campo de tempo, `fixos` (recorte do sistema) e "
     "apelidos de campo (nivel, mensagem, servico...: valem em campos, consulta, retornar e agrupar_por); consulta "
     "salva vai em `salva` pelo título. Sem esse arquivo, pergunte uma vez: configurar (elk_configurar) ou seguir "
@@ -74,12 +77,15 @@ ALIASES = {
     "dev": "dev", "desenvolvimento": "dev", "desenv": "dev", "d": "dev",
 }
 
-Projeto = Annotated[str | None, Field(description="caminho absoluto do workspace")]
+SEM_PROJETO = ("sem `projeto`: índice, campo de tempo, fixos e apelidos da config não foram aplicados; "
+               "repita passando o caminho absoluto do workspace")
+
+Projeto = Annotated[str | None, Field(description="caminho absoluto do workspace; sem ele a config não vale")]
 Ambiente = Annotated[str | None, Field(description="prod (padrão), homol ou dev")]
-Indice = Annotated[str | None, Field(description="nome em indices da config (padrão: indice-padrao) ou padrão real")]
-Inicio = Annotated[str, Field(description="'now-1h' ou ISO 8601 com fuso")]
+Indice = Annotated[str | None, Field(description="omita para o padrão da config; ou nome em indices da config")]
+Inicio = Annotated[str, Field(description="'now-1h' ou ISO 8601 com fuso (-03:00); comece curto")]
 Consulta = Annotated[str | None, Field(description="Lucene; KQL simples é convertido")]
-Campos = Annotated[dict | None, Field(description="{campo ou apelido: valor} exato; '*' no valor = wildcard")]
+Campos = Annotated[dict | None, Field(description="{apelido da config ou campo: valor} exato; '*' no valor = wildcard")]
 Filtros = Annotated[list[dict] | None, Field(description="Query DSL")]
 Salva = Annotated[str | None, Field(description="título (config) ou id de consulta salva do Kibana")]
 
@@ -98,11 +104,29 @@ def _enxuto(schema):
     return s
 
 
+def _avisa_sem_projeto(fn):
+    """Sem `projeto`, a resposta diz que a config não foi aplicada (o cliente pode não exigir o obrigatório)."""
+    if "projeto" not in inspect.signature(fn).parameters:
+        return fn
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        resultado = fn(*args, **kwargs)
+        if kwargs.get("projeto"):
+            return resultado
+        if isinstance(resultado, dict):
+            return {**resultado, "aviso": SEM_PROJETO}
+        return f"> {SEM_PROJETO}\n\n{resultado}" if isinstance(resultado, str) else resultado
+    return wrapper
+
+
 def tool(fn):
     """Registra a tool com o envelope do contrato (um TextContent, sem outputSchema) e devolve `fn` intacta."""
-    mcp.tool(structured_output=False)(operacao(fn))
+    mcp.tool(structured_output=False)(operacao(_avisa_sem_projeto(fn)))
     registrada = mcp._tool_manager._tools[fn.__name__]
     registrada.parameters = _enxuto(registrada.parameters)
+    if "projeto" in registrada.parameters["properties"]:  # no schema é obrigatório: o modelo sempre o vê como tal
+        registrada.parameters["required"] = sorted({*registrada.parameters.get("required", []), "projeto"})
     return fn
 
 
@@ -417,7 +441,7 @@ def elk_buscar_logs(inicio: Inicio, projeto: Projeto = None, consulta: Consulta 
                         description="campos de cada item; padrão: tempo + nivel, servico, logger, mensagem da config; "
                                     "['*'] = todos")] = None,
                     indice: Indice = None, campo_tempo: str | None = None, ambiente: Ambiente = None) -> dict:
-    """Poucos documentos para ler na conversa (limite ≤ 100), textos cortados no começo. Para muitos: elk_exportar_csv.
+    """Conte antes com elk_contar; diga ambiente e janela na resposta; logs têm dados pessoais: mostre só o necessário. Poucos documentos para ler na conversa (limite ≤ 100), textos cortados no começo. Para muitos: elk_exportar_csv.
     → dados: {ambiente, indice, janela, total, retornados, itens[{_id, campo: valor}]}"""
     if not 1 <= limite <= LIMITE_TETO:
         raise Erro("entrada", f"`limite` deve estar entre 1 e {LIMITE_TETO}; para mais, use elk_exportar_csv "
@@ -453,7 +477,7 @@ def elk_contar(inicio: Inicio, projeto: Projeto = None, consulta: Consulta = Non
                comparar: Annotated[str | None, Field(
                    description="deslocamento da referência, ex.: '1d', '7d', '2h' (mesma janela antes)")] = None,
                indice: Indice = None, campo_tempo: str | None = None, ambiente: Ambiente = None) -> dict:
-    """Conta sem trazer documentos; `agrupar_por` dá os `top` valores mais frequentes; `comparar` conta também a
+    """Primeiro passo de toda análise: o volume é de milhões por hora. Causa raiz: comparar='1d' por nivel, depois só ERROR por servico, logger e excecao. Conta sem trazer documentos; `agrupar_por` dá os `top` valores mais frequentes; `comparar` conta também a
     janela de referência. → dados: {ambiente, indice, janela, total, grupos[{valor, total, ref?, novo?}],
     referencia?{inicio, fim, total}}"""
     alvo, query = _preparar(projeto, ambiente, indice, inicio, fim, consulta, campos, filtros, salva, campo_tempo)
@@ -502,7 +526,7 @@ def elk_exportar_csv(inicio: Inicio, projeto: Projeto = None,
                      consulta: Consulta = None, campos: Campos = None, filtros: Filtros = None, salva: Salva = None,
                      fim: str = "now", retornar: list[str] | None = None, max_linhas: int = 100_000,
                      indice: Indice = None, campo_tempo: str | None = None, ambiente: Ambiente = None) -> dict:
-    """Grava em CSV (UTF-8 com BOM, do mais antigo ao mais novo) todos os documentos, sem passá-los pela conversa.
+    """Para resultado grande: leia só as primeiras linhas (head -n 5) e analise com um script Python em arquivo .py; nunca leia o CSV inteiro. Grava em CSV (UTF-8 com BOM, do mais antigo ao mais novo) todos os documentos, sem passá-los pela conversa.
     Colunas = `retornar` ou os campos da 1ª página. Arquivo existente é sobrescrito. → dados: {arquivo, linhas,
     total, truncado, colunas}"""
     alvo, query = _preparar(projeto, ambiente, indice, inicio, fim, consulta, campos, filtros, salva, campo_tempo)
@@ -553,7 +577,7 @@ def elk_job(projeto: Projeto = None,
                             "quando houver; texto só sem JSON; ou o CSV do elk_job. Sem ele, ELK")] = None,
             erros: Annotated[bool, Field(description="varre WARN/ERROR da janela da execução")] = True,
             indice: Indice = None, ambiente: Ambiente = None) -> str:
-    """Última execução de um job Spring Batch: acha início e fim, baixa as linhas dos listeners de job e step
+    """Use para "logs do job X" e "último job executado". Última execução de um job Spring Batch: acha início e fim, baixa as linhas dos listeners de job e step
     ("...LoggerListener") em CSV no download.path da config (padrão .kiro/local/elk) e monta dele a tabela por step,
     uma linha por partição e a soma, mais WARN/ERROR agrupados. No ELK usa os apelidos mensagem, logger, thread e
     nivel da config; o relatório também fica em .md ao lado do CSV; `log_local` aceita esse CSV para refazer o
@@ -827,7 +851,7 @@ def elk_atualizar_consulta(id: str, projeto: Projeto = None, espaco: str = "defa
 @tool
 def elk_listar_indices(busca: str | None = None, espaco: str | None = None, limite: int = 50,
                        ambiente: Ambiente = None) -> dict:
-    """Data views do Kibana; `busca` = início de palavra do título; sem `espaco`, todos.
+    """Só sem config no projeto ou para configurar; com config, use os nomes de elk_status. Data views do Kibana; `busca` = início de palavra do título; sem `espaco`, todos.
     → dados: {total, itens[{espaco, nome, padrao (vai em indice), campo_tempo}]}"""
     amb = _ambiente(ambiente)
     out = {}
@@ -844,7 +868,7 @@ def elk_listar_indices(busca: str | None = None, espaco: str | None = None, limi
 def elk_listar_campos(busca: Annotated[str | None, Field(description="trecho do nome")] = None,
                       projeto: Projeto = None, limite: int = 100, indice: Indice = None,
                       ambiente: Ambiente = None) -> dict:
-    """Campos do índice; `agregavel` serve para agrupar_por e filtro exato. Índices têm milhares: use `busca`.
+    """Só quando o campo não estiver nos apelidos da config (elk_status). Campos do índice; `agregavel` serve para agrupar_por e filtro exato. Índices têm milhares: use `busca`.
     → dados: {total, itens[{campo, tipo, agregavel}]}"""
     alvo = _alvo(projeto, ambiente, indice)
     s = get_session()
@@ -865,7 +889,7 @@ def elk_listar_campos(busca: Annotated[str | None, Field(description="trecho do 
 
 @tool
 def elk_status(projeto: Projeto = None, ambiente: Ambiente = None) -> dict:
-    """Confere credencial, servidor e a config do projeto no ambiente. → dados: {usuario, ambientes[], es_direto[],
+    """Comece por aqui: mostra índices, apelidos e consultas já mapeados; use esses nomes. Sem config: pergunte uma vez se configura (elk_configurar) ou segue com `indice` de elk_listar_indices. Confere credencial, servidor e a config do projeto no ambiente. → dados: {usuario, ambientes[], es_direto[],
     conexao, config?{arquivo, existe, faltando[], indice_padrao, indices{nome: padrao}, apelidos[], consultas[],
     download}}"""
     amb = _ambiente(ambiente)

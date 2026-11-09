@@ -3,7 +3,7 @@
 Servidor MCP para os logs do ELK (Elasticsearch + Kibana). Lê os logs; a única escrita é criar e atualizar busca
 salva no Kibana. Desde a 3.0 é **autossuficiente**, sem power: o servidor lê a configuração do projeto
 (`.sabia/config/elk/elk-<ambiente>.json`) e aplica sozinho índice, campo de tempo, recorte do sistema e apelidos de
-campo; as regras de uso (volume, diagnóstico, jobs, setup) vão nas `instructions` do MCP, e o sumário de execução de
+campo; as regras de uso vão nas descrições das tools e nas `instructions` do MCP (veja [Como o modelo recebe as regras](#como-o-modelo-recebe-as-regras)), e o sumário de execução de
 job Spring Batch é montado em Python, não pela LLM.
 
 ## Instalação
@@ -44,6 +44,17 @@ uv sync
 uv run pytest
 uv run mcp dev mcp_elk/server.py   # MCP Inspector
 ```
+
+## Como o modelo recebe as regras
+
+O modelo não lê este README. As regras chegam por dois canais:
+
+| Canal | Chega ao modelo? | O que vai nele |
+|---|---|---|
+| Descrição e parâmetros das tools | Sempre, em qualquer ferramenta | O essencial: começar por `elk_status`, passar `projeto`, contar antes, usar índices e apelidos da config |
+| `instructions` do servidor | Só se a ferramenta repassar | O complemento: diagnóstico de incidente, job Spring Batch e passo a passo de configuração |
+
+`projeto` é obrigatório no schema das tools; sem ele, a resposta traz um `aviso` de que a config do projeto não foi aplicada.
 
 ## Configuração
 
