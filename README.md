@@ -77,14 +77,14 @@ alguns Kibana só oferecem `AES256-SHA256`, que a lista do Python exclui.
 ## Configuração do projeto
 
 `<projeto>/.sabia/config/elk/elk-<ambiente>.json` (`elk-prod.json`, `elk-homol.json`, `elk-dev.json`), validado pelo
-[elk.schema.json](mcp_elk/elk.schema.json) e gravado pela tool `elk_configurar` (peça ao agente "configurar o ELK").
+[elk.schema.json](schemas/elk.schema.json) e gravado pela tool `elk_configurar` (peça ao agente "configurar o ELK").
 Na leitura, o MCP procura nesta ordem: `.sabia/config/elk/`, `.kiro/config/elk/`, `.kiro/config/sdd/`; se o arquivo
 existir em mais de uma, vale a primeira. A gravação vai sempre para `.sabia/config/elk/`.
 Sem segredos:
 
 ```json
 {
-  "$schema": "https://dxaraujo.github.io/json-schemas/mcp/elk/elk.schema.json",
+  "$schema": "https://raw.githubusercontent.com/dxaraujo/mcp-elk/main/schemas/elk.schema.json",
   "indice-padrao": "aplicacao",
   "indices": {
     "aplicacao": {

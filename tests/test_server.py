@@ -623,8 +623,7 @@ def test_job_local_jsonl_fora_de_ordem_usa_a_mesma_ordenacao(tmp_path):
     assert "| ↳ **Σ 2 partições** | COMPLETED | 21 |" in md and md.index("| prepara |") < md.index("| grava |")
 
 
-def test_schema_igual_ao_publicado():
-    publicado = Path(__file__).resolve().parents[2] / "json-schemas/mcp/elk/elk.schema.json"
-    if not publicado.exists():
-        pytest.skip("repositório json-schemas não clonado ao lado")
-    assert (Path(server.__file__).with_name("elk.schema.json")).read_bytes() == publicado.read_bytes()
+def test_schema_aponta_para_este_repositorio():
+    schema = json.loads((Path(__file__).resolve().parents[1] / "schemas/elk.schema.json").read_text("utf-8"))
+    assert schema["$id"] == "https://raw.githubusercontent.com/dxaraujo/mcp-elk/main/schemas/elk.schema.json"
+    assert not Path(server.__file__).with_name("elk.schema.json").exists()  # uma cópia só, em schemas/

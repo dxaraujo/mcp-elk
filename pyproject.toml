@@ -25,6 +25,10 @@ dev = ["pytest>=8"]
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_elk"]
 
+# o schema mora em schemas/ (a URL pública); o build o leva para dentro do pacote, que valida sem rede
+[tool.hatch.build.targets.wheel.force-include]
+"schemas/elk.schema.json" = "mcp_elk/elk.schema.json"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
